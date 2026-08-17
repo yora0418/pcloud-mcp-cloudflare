@@ -11,7 +11,11 @@ Provide a serverless, read-only remote MCP interface to pCloud so MCP-compatible
 ```text
 MCP-compatible AI client
         |
-        | Remote MCP
+        | Remote MCP + OAuth
+        v
+Cloudflare Access
+        |
+        | signed Access JWT
         v
 Cloudflare Worker
         |
@@ -20,7 +24,7 @@ Cloudflare Worker
 pCloud
 ```
 
-The public repository contains the software. Each user deploys their own Worker instance and supplies their own credentials.
+The public repository contains the software. Each user deploys their own Worker instance and supplies their own credentials and Access configuration.
 
 ## Initial security boundary
 
@@ -42,6 +46,25 @@ Explicitly out of scope for v1:
 - create folders
 - create shares / public links
 - modify file contents
+
+### MCP endpoint protection
+
+The production Worker is protected by Cloudflare Access before any pCloud data is exposed.
+
+The Worker also validates the signed JWT supplied by Access in the `Cf-Access-Jwt-Assertion` header. Validation checks:
+
+- the JWT signature against the Cloudflare Access JWKS endpoint
+- the issuer against the deployment's Cloudflare One team domain
+- the audience against the deployment's Access Application Audience (AUD) tag
+
+These deployment-specific values are provided as Worker environment variables:
+
+- `TEAM_DOMAIN`
+- `POLICY_AUD`
+
+They are configuration values rather than application secrets, but are intentionally not committed as developer-specific values because each self-hosted deployment has its own Access configuration.
+
+Cloudflare Managed OAuth is used so compatible non-browser MCP clients can authenticate through Access. The client receives an opaque OAuth token; Cloudflare resolves it at the edge and forwards the signed Access assertion to the Worker.
 
 ## Initial pCloud authentication model
 
@@ -109,9 +132,15 @@ The project should target Cloudflare Workers directly rather than requiring a lo
 Planned characteristics:
 
 - stateless remote MCP endpoint where practical
+- Cloudflare Access in front of the production Worker
+- Managed OAuth for compatible MCP clients
+- Worker-side Access JWT validation as defense in depth
 - secrets stored using Cloudflare's secret facilities, never committed to Git
+- deployment-specific non-secret configuration stored in Worker environment variables
 - minimal dependencies
 - no dedicated VPS / home server requirement
+
+`keep_vars` is enabled in Wrangler so self-hosters can configure deployment-specific variables in the Cloudflare dashboard without having those values removed by subsequent GitHub/Wrangler deployments.
 
 ## Deployment / ownership model
 
@@ -142,17 +171,24 @@ Rationale under consideration: if modified versions are offered to other users a
 
 ## Development phases
 
-### Phase 0 — MCP skeleton
+### Phase 0 — MCP skeleton — complete
 
 - create the Cloudflare Workers project
 - expose a minimal remote MCP endpoint
 - add a harmless test tool such as `hello`
 - verify with an MCP inspector/client
 
-### Phase 1 — AI client connectivity
+### Phase 1 — AI client connectivity — complete
 
 - connect ChatGPT or another compatible remote MCP client
 - verify that the test tool can be discovered and called
+
+### Phase 1A — MCP endpoint protection — in progress
+
+- protect the Worker with Cloudflare Access
+- enable Managed OAuth
+- validate `Cf-Access-Jwt-Assertion` inside the Worker
+- verify authenticated access with an MCP inspector and ChatGPT
 
 ### Phase 2 — pCloud OAuth
 
