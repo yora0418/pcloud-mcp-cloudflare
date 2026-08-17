@@ -70,12 +70,15 @@ async function verifyCloudflareAccess(
   env: Env,
 ): Promise<boolean> {
   if (!env.TEAM_DOMAIN || !env.POLICY_AUD) {
-    console.error("Cloudflare Access validation is not configured.");
+    console.error(
+      `Cloudflare Access validation is not configured. TEAM_DOMAIN=${Boolean(env.TEAM_DOMAIN)} POLICY_AUD=${Boolean(env.POLICY_AUD)}`,
+    );
     return false;
   }
 
   const token = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!token) {
+    console.warn("Cloudflare Access JWT header is missing.");
     return false;
   }
 
