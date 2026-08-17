@@ -1,0 +1,24 @@
+{
+  "name": "pcloud-mcp-cloudflare",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Serverless, read-only pCloud remote MCP server for Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.114.0"
+  }
+}
