@@ -178,7 +178,7 @@ function createServer(env: Env) {
           );
         }
 
-        const params = folderId
+        const params: Record<string, string> = folderId
           ? { folderid: folderId }
           : path
             ? { path }
