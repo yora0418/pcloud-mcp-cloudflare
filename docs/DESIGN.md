@@ -37,6 +37,7 @@ Allowed capabilities:
 - retrieve file metadata
 - read supported file contents
 - retrieve supported image content
+- retrieve supported Office content
 
 Explicitly out of scope for v1:
 
@@ -185,6 +186,22 @@ Retrieve a supported image by exact virtual path and return it directly as MCP I
 - uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as `read_file`
 - does not expose physical paths, temporary download URLs, file contents in logs, or caller-supplied file-ID access
 
+### `get_office_content`
+
+Retrieve an OOXML Office file by exact virtual path and return its original bytes as an MCP embedded binary resource. The initial implementation:
+
+- supports `.docx`, `.xlsx`, and `.pptx` with their format-specific MIME types
+- accepts the matching canonical MIME type, or a generic/ZIP container MIME only when the supported extension and bounded OOXML structure also match
+- enforces a 1 MiB source-file hard limit through metadata, `Content-Length`, streaming byte count, and exact metadata/body-size checks
+- validates ZIP end records, central-directory entries, local headers, entry names, compression methods, CRC-32 values, and required OOXML package parts
+- rejects multi-disk, ZIP64, encrypted, macro-bearing, path-ambiguous, overlapping, extraneously padded, or structurally inconsistent packages
+- checks stored and deflated entry data through bounded streaming, without retaining or returning extracted contents
+- limits packages to 2,048 entries, 16 MiB declared and actual uncompressed bytes per entry, and 32 MiB declared and actual uncompressed bytes in total
+- requires `[Content_Types].xml`, `_rels/.rels`, and the format-specific main part (`word/document.xml`, `xl/workbook.xml`, or `ppt/presentation.xml`)
+- returns only the original base64-encoded package bytes with the canonical Office MIME type and an opaque custom resource URI; ZIP entries and XML are not returned separately
+- uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as the existing content tools
+- does not support PDF, legacy `.doc`/`.xls`/`.ppt`, macro-enabled Office formats, or arbitrary ZIP retrieval
+
 ## pCloud-specific implementation notes
 
 Implementation must account for pCloud's API/OAuth behavior, including regional API host handling where required.
@@ -294,6 +311,13 @@ Rationale under consideration: if modified versions are offered to other users a
 - return bounded image bytes directly as MCP ImageContent
 - enforce metadata, binary-signature, source-size, and virtual-root checks
 - validate PNG and JPEG ImageContent delivery through a deployed Worker and ChatGPT Vision
+
+### Phase 7 — Office content — implementation complete, integration validation pending
+
+- implement `get_office_content` for DOCX, XLSX, and PPTX files
+- return the original bounded package bytes as an MCP embedded binary resource
+- validate metadata, source size, bounded OOXML ZIP structure, and required format-specific package parts without extraction
+- verify native Office handling against a deployed Worker and ChatGPT MCP before marking the phase complete
 
 ### Later
 

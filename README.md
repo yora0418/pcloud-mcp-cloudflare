@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** Functional private prototype. Authenticated ChatGPT connectivity, pCloud OAuth, folder listing, scoped virtual roots, metadata search, file metadata, bounded text reading, and bounded image retrieval are implemented. The repository is still private while the initial feature set and security review are completed.
+> **Status:** Functional private prototype. Authenticated ChatGPT connectivity, pCloud OAuth, folder listing, scoped virtual roots, metadata search, file metadata, bounded text reading, bounded image retrieval, and bounded Office content retrieval are implemented. The repository is still private while the initial feature set and security review are completed.
 
 ## Goals
 
@@ -20,6 +20,7 @@ A serverless, read-only remote MCP server for pCloud, designed to run on Cloudfl
 - `search_files` — metadata-only search across names and virtual paths
 - `get_file_info` — retrieve normalized metadata for an exact virtual file path
 - `get_image_content` — return a PNG or JPEG at an exact virtual path as MCP ImageContent
+- `get_office_content` — return a DOCX, XLSX, or PPTX at an exact virtual path as an MCP embedded binary resource
 - `read_file` — read a supported text file at an exact virtual path
 
 The initial release will **not** provide upload, delete, move, rename, folder creation, or sharing operations.
@@ -70,7 +71,7 @@ If `PCLOUD_ROOT_PATH` is unset, the real pCloud root remains visible as `/`.
 
 It does **not** search inside file contents.
 
-## File metadata, text reading, and image content
+## File metadata, text reading, image content, and Office content
 
 `get_file_info` uses an exact virtual path and returns selected file metadata, including available image, audio, or video details. It does not accept a caller-supplied file ID, and it never returns the hidden physical root prefix.
 
@@ -79,6 +80,8 @@ It does **not** search inside file contents.
 The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received.
 
 `get_image_content` is a separate read-only path for PNG and JPEG files. It accepts an exact virtual path and returns the complete image directly as MCP ImageContent after validating metadata, source size, and the downloaded binary signature. The image source-file hard limit is 5 MiB (`5242880` bytes), independent of the smaller inline UTF-8 text limits used by `read_file`.
+
+`get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker validates a bounded OOXML ZIP structure and checks compressed entry data through bounded streaming; it does not retain or return extracted XML parts. PDF, legacy Office formats, macro-enabled formats, and arbitrary ZIP files are not supported. Live ChatGPT integration validation remains pending.
 
 ## Runtime
 

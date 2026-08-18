@@ -47,6 +47,66 @@ const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
 const HARD_READ_MAX_BYTES = 1024 * 1024;
 const HARD_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const HARD_OFFICE_MAX_BYTES = 1024 * 1024;
+const MAX_OOXML_ENTRY_COUNT = 2048;
+const MAX_OOXML_ENTRY_NAME_BYTES = 1024;
+const MAX_OOXML_ENTRY_UNCOMPRESSED_BYTES = 16 * 1024 * 1024;
+const MAX_OOXML_TOTAL_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
+
+const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50;
+const ZIP_DATA_DESCRIPTOR_SIGNATURE = 0x08074b50;
+const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY_BYTES = 22;
+const ZIP_MAX_COMMENT_BYTES = 0xffff;
+const ZIP_CRC32_TABLE = Array.from({ length: 256 }, (_, tableIndex) => {
+  let value = tableIndex;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value =
+      (value & 1) !== 0
+        ? 0xedb88320 ^ (value >>> 1)
+        : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+type SupportedOfficeMimeType =
+  | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+type SupportedOfficeFormat = {
+  extension: ".docx" | ".xlsx" | ".pptx";
+  mimeType: SupportedOfficeMimeType;
+  mainPart: "word/document.xml" | "xl/workbook.xml" | "ppt/presentation.xml";
+};
+type ValidatedZipEntry = {
+  compressionMethod: 0 | 8;
+  crc32: number;
+  uncompressedSize: number;
+  dataOffset: number;
+  dataEndOffset: number;
+};
+
+const SUPPORTED_OFFICE_FORMATS: readonly SupportedOfficeFormat[] = [
+  {
+    extension: ".docx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    mainPart: "word/document.xml",
+  },
+  {
+    extension: ".xlsx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    mainPart: "xl/workbook.xml",
+  },
+  {
+    extension: ".pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    mainPart: "ppt/presentation.xml",
+  },
+];
 
 type SupportedImageMimeType = "image/png" | "image/jpeg";
 type SupportedImageFormat = {
@@ -88,6 +148,12 @@ const GENERIC_MIME_TYPES = new Set([
   "application/unknown",
   "application/x-empty",
   "binary/octet-stream",
+]);
+
+const OFFICE_CONTAINER_FALLBACK_MIME_TYPES = new Set([
+  ...GENERIC_MIME_TYPES,
+  "application/zip",
+  "application/x-zip-compressed",
 ]);
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -701,6 +767,585 @@ function detectSupportedImageMimeType(
   return SUPPORTED_IMAGE_FORMATS.find((format) =>
     hasByteSignature(bytes, format.signature),
   )?.mimeType;
+}
+
+function getExpectedOfficeFormat(
+  name: string,
+  contentType: string | undefined,
+  virtualPath: string,
+): SupportedOfficeFormat {
+  const extension = getFileExtension(name);
+  const format = SUPPORTED_OFFICE_FORMATS.find(
+    (candidate) => candidate.extension === extension,
+  );
+  if (!format) {
+    throw new Error(
+      `File at virtual path ${JSON.stringify(virtualPath)} is not a supported DOCX, XLSX, or PPTX file.`,
+    );
+  }
+
+  const mimeType = normalizeMimeType(contentType);
+  if (
+    mimeType !== format.mimeType &&
+    !OFFICE_CONTAINER_FALLBACK_MIME_TYPES.has(mimeType)
+  ) {
+    throw new Error(
+      `File metadata at virtual path ${JSON.stringify(virtualPath)} does not match the expected Office format.`,
+    );
+  }
+
+  return format;
+}
+
+function invalidOfficePackageError(): Error {
+  return new Error(
+    "pCloud returned an invalid or unsupported OOXML Office package.",
+  );
+}
+
+function readZipUint16(bytes: Uint8Array, offset: number): number {
+  if (offset < 0 || offset + 2 > bytes.byteLength) {
+    throw invalidOfficePackageError();
+  }
+
+  return bytes[offset] + bytes[offset + 1] * 0x100;
+}
+
+function readZipUint32(bytes: Uint8Array, offset: number): number {
+  if (offset < 0 || offset + 4 > bytes.byteLength) {
+    throw invalidOfficePackageError();
+  }
+
+  return (
+    bytes[offset] +
+    bytes[offset + 1] * 0x100 +
+    bytes[offset + 2] * 0x10000 +
+    bytes[offset + 3] * 0x1000000
+  );
+}
+
+function findZipEndOfCentralDirectory(bytes: Uint8Array): number {
+  if (bytes.byteLength < ZIP_END_OF_CENTRAL_DIRECTORY_BYTES) {
+    throw invalidOfficePackageError();
+  }
+
+  const firstPossibleOffset = Math.max(
+    0,
+    bytes.byteLength -
+      ZIP_END_OF_CENTRAL_DIRECTORY_BYTES -
+      ZIP_MAX_COMMENT_BYTES,
+  );
+
+  for (
+    let offset = bytes.byteLength - ZIP_END_OF_CENTRAL_DIRECTORY_BYTES;
+    offset >= firstPossibleOffset;
+    offset -= 1
+  ) {
+    if (
+      readZipUint32(bytes, offset) ===
+      ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE
+    ) {
+      const commentLength = readZipUint16(bytes, offset + 20);
+      if (
+        offset + ZIP_END_OF_CENTRAL_DIRECTORY_BYTES + commentLength ===
+        bytes.byteLength
+      ) {
+        return offset;
+      }
+    }
+  }
+
+  throw invalidOfficePackageError();
+}
+
+function validateZipExtraFields(
+  bytes: Uint8Array,
+  offset: number,
+  length: number,
+): void {
+  const endOffset = offset + length;
+  if (endOffset > bytes.byteLength) {
+    throw invalidOfficePackageError();
+  }
+
+  while (offset < endOffset) {
+    if (offset + 4 > endOffset) {
+      throw invalidOfficePackageError();
+    }
+
+    const headerId = readZipUint16(bytes, offset);
+    const dataLength = readZipUint16(bytes, offset + 2);
+    offset += 4;
+
+    if (headerId === 0x0001 || offset + dataLength > endOffset) {
+      throw invalidOfficePackageError();
+    }
+
+    offset += dataLength;
+  }
+}
+
+function decodeZipEntryName(
+  bytes: Uint8Array,
+  offset: number,
+  length: number,
+  decoder: TextDecoder,
+): string {
+  if (
+    length < 1 ||
+    length > MAX_OOXML_ENTRY_NAME_BYTES ||
+    offset + length > bytes.byteLength
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  let name: string;
+  try {
+    name = decoder.decode(bytes.subarray(offset, offset + length));
+  } catch {
+    throw invalidOfficePackageError();
+  }
+
+  if (
+    name.startsWith("/") ||
+    name.includes("\\") ||
+    name.includes("//") ||
+    name.includes(":") ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  const segments = name.split("/");
+  const isDirectory = segments.at(-1) === "";
+  const pathSegments = isDirectory ? segments.slice(0, -1) : segments;
+  if (
+    pathSegments.length === 0 ||
+    pathSegments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  return name;
+}
+
+function zipByteRangesEqual(
+  bytes: Uint8Array,
+  firstOffset: number,
+  secondOffset: number,
+  length: number,
+): boolean {
+  if (
+    firstOffset + length > bytes.byteLength ||
+    secondOffset + length > bytes.byteLength
+  ) {
+    return false;
+  }
+
+  for (let index = 0; index < length; index += 1) {
+    if (bytes[firstOffset + index] !== bytes[secondOffset + index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function validateZipDataDescriptor(
+  bytes: Uint8Array,
+  offset: number,
+  centralDirectoryOffset: number,
+  crc32: number,
+  compressedSize: number,
+  uncompressedSize: number,
+): number {
+  if (
+    offset + 16 <= centralDirectoryOffset &&
+    readZipUint32(bytes, offset) === ZIP_DATA_DESCRIPTOR_SIGNATURE &&
+    readZipUint32(bytes, offset + 4) === crc32 &&
+    readZipUint32(bytes, offset + 8) === compressedSize &&
+    readZipUint32(bytes, offset + 12) === uncompressedSize
+  ) {
+    return offset + 16;
+  }
+
+  if (
+    offset + 12 <= centralDirectoryOffset &&
+    readZipUint32(bytes, offset) === crc32 &&
+    readZipUint32(bytes, offset + 4) === compressedSize &&
+    readZipUint32(bytes, offset + 8) === uncompressedSize
+  ) {
+    return offset + 12;
+  }
+
+  throw invalidOfficePackageError();
+}
+
+function validateZipLocalEntry(
+  bytes: Uint8Array,
+  centralNameOffset: number,
+  nameLength: number,
+  localHeaderOffset: number,
+  centralDirectoryOffset: number,
+  generalPurposeFlags: number,
+  compressionMethod: number,
+  crc32: number,
+  compressedSize: number,
+  uncompressedSize: number,
+): { start: number; end: number; dataOffset: number; dataEndOffset: number } {
+  if (
+    localHeaderOffset + 30 > centralDirectoryOffset ||
+    readZipUint32(bytes, localHeaderOffset) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  const localFlags = readZipUint16(bytes, localHeaderOffset + 6);
+  const localCompressionMethod = readZipUint16(bytes, localHeaderOffset + 8);
+  const localCrc32 = readZipUint32(bytes, localHeaderOffset + 14);
+  const localCompressedSize = readZipUint32(bytes, localHeaderOffset + 18);
+  const localUncompressedSize = readZipUint32(bytes, localHeaderOffset + 22);
+  const localNameLength = readZipUint16(bytes, localHeaderOffset + 26);
+  const localExtraLength = readZipUint16(bytes, localHeaderOffset + 28);
+  const localNameOffset = localHeaderOffset + 30;
+  const localExtraOffset = localNameOffset + localNameLength;
+  const dataOffset = localExtraOffset + localExtraLength;
+  const dataEndOffset = dataOffset + compressedSize;
+
+  if (
+    localFlags !== generalPurposeFlags ||
+    localCompressionMethod !== compressionMethod ||
+    localNameLength !== nameLength ||
+    dataEndOffset > centralDirectoryOffset ||
+    !zipByteRangesEqual(
+      bytes,
+      centralNameOffset,
+      localNameOffset,
+      nameLength,
+    )
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  validateZipExtraFields(bytes, localExtraOffset, localExtraLength);
+
+  const usesDataDescriptor = (generalPurposeFlags & 0x0008) !== 0;
+  if (!usesDataDescriptor) {
+    if (
+      localCrc32 !== crc32 ||
+      localCompressedSize !== compressedSize ||
+      localUncompressedSize !== uncompressedSize
+    ) {
+      throw invalidOfficePackageError();
+    }
+
+    return {
+      start: localHeaderOffset,
+      end: dataEndOffset,
+      dataOffset,
+      dataEndOffset,
+    };
+  }
+
+  if (
+    ![0, crc32].includes(localCrc32) ||
+    ![0, compressedSize].includes(localCompressedSize) ||
+    ![0, uncompressedSize].includes(localUncompressedSize)
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  return {
+    start: localHeaderOffset,
+    end: validateZipDataDescriptor(
+      bytes,
+      dataEndOffset,
+      centralDirectoryOffset,
+      crc32,
+      compressedSize,
+      uncompressedSize,
+    ),
+    dataOffset,
+    dataEndOffset,
+  };
+}
+
+function updateZipCrc32(value: number, bytes: Uint8Array): number {
+  for (const byte of bytes) {
+    value = ZIP_CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  }
+  return value >>> 0;
+}
+
+async function validateZipEntryContent(
+  bytes: Uint8Array,
+  entry: ValidatedZipEntry,
+): Promise<void> {
+  if (entry.compressionMethod === 0) {
+    const content = bytes.subarray(entry.dataOffset, entry.dataEndOffset);
+    const crc32 = (updateZipCrc32(0xffffffff, content) ^ 0xffffffff) >>> 0;
+    if (content.byteLength !== entry.uncompressedSize || crc32 !== entry.crc32) {
+      throw invalidOfficePackageError();
+    }
+    return;
+  }
+
+  const compressedBytes = bytes.subarray(
+    entry.dataOffset,
+    entry.dataEndOffset,
+  );
+  const compressedStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (compressedBytes.byteLength > 0) {
+        controller.enqueue(compressedBytes);
+      }
+      controller.close();
+    },
+  });
+
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    const decompressor = new DecompressionStream(
+      "deflate-raw",
+    ) as unknown as TransformStream<Uint8Array, Uint8Array>;
+    reader = compressedStream
+      .pipeThrough(decompressor)
+      .getReader();
+  } catch {
+    throw invalidOfficePackageError();
+  }
+
+  let actualSize = 0;
+  let crc32 = 0xffffffff;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      actualSize += value.byteLength;
+      if (actualSize > entry.uncompressedSize) {
+        try {
+          await reader.cancel("OOXML entry exceeded its declared size.");
+        } catch {
+          // The generic package-validation error below remains relevant.
+        }
+        throw invalidOfficePackageError();
+      }
+
+      crc32 = updateZipCrc32(crc32, value);
+    }
+  } catch {
+    throw invalidOfficePackageError();
+  } finally {
+    reader.releaseLock();
+  }
+
+  const finalCrc32 = (crc32 ^ 0xffffffff) >>> 0;
+  if (actualSize !== entry.uncompressedSize || finalCrc32 !== entry.crc32) {
+    throw invalidOfficePackageError();
+  }
+}
+
+function isMacroOfficePart(name: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return (
+    normalizedName === "vbaproject.bin" ||
+    normalizedName === "vbadata.xml" ||
+    normalizedName.endsWith("/vbaproject.bin") ||
+    normalizedName.endsWith("/vbadata.xml") ||
+    normalizedName.startsWith("xl/macrosheets/") ||
+    normalizedName.startsWith("xl/intlmacrosheets/")
+  );
+}
+
+async function validateOfficePackage(
+  bytes: Uint8Array,
+  format: SupportedOfficeFormat,
+): Promise<void> {
+  const endOfCentralDirectoryOffset = findZipEndOfCentralDirectory(bytes);
+  const diskNumber = readZipUint16(bytes, endOfCentralDirectoryOffset + 4);
+  const centralDirectoryDisk = readZipUint16(
+    bytes,
+    endOfCentralDirectoryOffset + 6,
+  );
+  const entriesOnDisk = readZipUint16(
+    bytes,
+    endOfCentralDirectoryOffset + 8,
+  );
+  const totalEntries = readZipUint16(
+    bytes,
+    endOfCentralDirectoryOffset + 10,
+  );
+  const centralDirectorySize = readZipUint32(
+    bytes,
+    endOfCentralDirectoryOffset + 12,
+  );
+  const centralDirectoryOffset = readZipUint32(
+    bytes,
+    endOfCentralDirectoryOffset + 16,
+  );
+
+  if (
+    diskNumber !== 0 ||
+    centralDirectoryDisk !== 0 ||
+    entriesOnDisk !== totalEntries ||
+    totalEntries < 1 ||
+    totalEntries > MAX_OOXML_ENTRY_COUNT ||
+    centralDirectorySize === 0xffffffff ||
+    centralDirectoryOffset === 0xffffffff ||
+    centralDirectoryOffset + centralDirectorySize !==
+      endOfCentralDirectoryOffset
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const entryNames = new Set<string>();
+  const normalizedEntryNames = new Set<string>();
+  const nonEmptyFileNames = new Set<string>();
+  const localEntryRanges: Array<{ start: number; end: number }> = [];
+  const zipEntries: ValidatedZipEntry[] = [];
+  let totalUncompressedBytes = 0;
+  let centralOffset = centralDirectoryOffset;
+
+  for (let entryIndex = 0; entryIndex < totalEntries; entryIndex += 1) {
+    if (
+      centralOffset + 46 > endOfCentralDirectoryOffset ||
+      readZipUint32(bytes, centralOffset) !==
+        ZIP_CENTRAL_DIRECTORY_SIGNATURE
+    ) {
+      throw invalidOfficePackageError();
+    }
+
+    const generalPurposeFlags = readZipUint16(bytes, centralOffset + 8);
+    const compressionMethod = readZipUint16(bytes, centralOffset + 10);
+    const crc32 = readZipUint32(bytes, centralOffset + 16);
+    const compressedSize = readZipUint32(bytes, centralOffset + 20);
+    const uncompressedSize = readZipUint32(bytes, centralOffset + 24);
+    const nameLength = readZipUint16(bytes, centralOffset + 28);
+    const extraLength = readZipUint16(bytes, centralOffset + 30);
+    const commentLength = readZipUint16(bytes, centralOffset + 32);
+    const startingDisk = readZipUint16(bytes, centralOffset + 34);
+    const localHeaderOffset = readZipUint32(bytes, centralOffset + 42);
+    const nameOffset = centralOffset + 46;
+    const extraOffset = nameOffset + nameLength;
+    const nextCentralOffset = extraOffset + extraLength + commentLength;
+
+    if (
+      nextCentralOffset > endOfCentralDirectoryOffset ||
+      (generalPurposeFlags & ~0x080e) !== 0 ||
+      ![0, 8].includes(compressionMethod) ||
+      (compressionMethod === 0 && compressedSize !== uncompressedSize) ||
+      compressedSize === 0xffffffff ||
+      uncompressedSize === 0xffffffff ||
+      localHeaderOffset === 0xffffffff ||
+      startingDisk !== 0 ||
+      uncompressedSize > MAX_OOXML_ENTRY_UNCOMPRESSED_BYTES
+    ) {
+      throw invalidOfficePackageError();
+    }
+
+    validateZipExtraFields(bytes, extraOffset, extraLength);
+    const name = decodeZipEntryName(
+      bytes,
+      nameOffset,
+      nameLength,
+      decoder,
+    );
+    const normalizedName = name.toLowerCase();
+    if (
+      entryNames.has(name) ||
+      normalizedEntryNames.has(normalizedName) ||
+      (name.endsWith("/") &&
+        (compressedSize !== 0 || uncompressedSize !== 0)) ||
+      isMacroOfficePart(name)
+    ) {
+      throw invalidOfficePackageError();
+    }
+
+    entryNames.add(name);
+    normalizedEntryNames.add(normalizedName);
+    if (!name.endsWith("/") && uncompressedSize > 0) {
+      nonEmptyFileNames.add(name);
+    }
+
+    totalUncompressedBytes += uncompressedSize;
+    if (totalUncompressedBytes > MAX_OOXML_TOTAL_UNCOMPRESSED_BYTES) {
+      throw invalidOfficePackageError();
+    }
+
+    const localEntry = validateZipLocalEntry(
+      bytes,
+      nameOffset,
+      nameLength,
+      localHeaderOffset,
+      centralDirectoryOffset,
+      generalPurposeFlags,
+      compressionMethod,
+      crc32,
+      compressedSize,
+      uncompressedSize,
+    );
+    localEntryRanges.push(localEntry);
+    zipEntries.push({
+      compressionMethod: compressionMethod as 0 | 8,
+      crc32,
+      uncompressedSize,
+      dataOffset: localEntry.dataOffset,
+      dataEndOffset: localEntry.dataEndOffset,
+    });
+    centralOffset = nextCentralOffset;
+  }
+
+  if (centralOffset !== endOfCentralDirectoryOffset) {
+    throw invalidOfficePackageError();
+  }
+
+  localEntryRanges.sort((first, second) => first.start - second.start);
+  if (
+    localEntryRanges[0].start !== 0 ||
+    localEntryRanges.at(-1)?.end !== centralDirectoryOffset
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  for (let index = 1; index < localEntryRanges.length; index += 1) {
+    if (localEntryRanges[index - 1].end !== localEntryRanges[index].start) {
+      throw invalidOfficePackageError();
+    }
+  }
+
+  if (
+    !nonEmptyFileNames.has("[Content_Types].xml") ||
+    !nonEmptyFileNames.has("_rels/.rels") ||
+    !nonEmptyFileNames.has(format.mainPart)
+  ) {
+    throw invalidOfficePackageError();
+  }
+
+  for (const entry of zipEntries) {
+    await validateZipEntryContent(bytes, entry);
+  }
+}
+
+async function createOfficeResourceUri(
+  virtualPath: string,
+  extension: SupportedOfficeFormat["extension"],
+): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(virtualPath),
+    ),
+  );
+  const opaqueId = Array.from(digest, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `pcloud-office://content/${opaqueId}${extension}`;
 }
 
 function encodeBytesAsBase64(bytes: Uint8Array): string {
@@ -1367,6 +2012,101 @@ function createServer(env: Env) {
                 error instanceof Error
                   ? error.message
                   : "Unknown pCloud read_file error.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_office_content",
+    {
+      description:
+        "Return a DOCX, XLSX, or PPTX file as an MCP embedded binary resource after validating its exact virtual path, bounded OOXML package structure, and 1 MiB source-file limit. This tool is read-only.",
+      inputSchema: {
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            "Required virtual absolute DOCX, XLSX, or PPTX path. File IDs are not accepted.",
+          ),
+      },
+    },
+    async ({ path }) => {
+      try {
+        const file = await statVirtualFile(env, path);
+        const name = getVirtualFileName(file.metadata, file.virtualPath);
+        if (!name.trim()) {
+          throw new Error("pCloud stat returned invalid Office file metadata.");
+        }
+
+        const contentType = optionalString(file.metadata.contenttype);
+        const size = getFileSize(file.metadata, file.virtualPath);
+        const format = getExpectedOfficeFormat(
+          name,
+          contentType,
+          file.virtualPath,
+        );
+
+        if (size > HARD_OFFICE_MAX_BYTES) {
+          throw new Error(
+            `Office file at virtual path ${JSON.stringify(file.virtualPath)} is ${size} bytes, which exceeds the hard maximum of ${HARD_OFFICE_MAX_BYTES} bytes.`,
+          );
+        }
+
+        let bytes: Uint8Array;
+        try {
+          bytes = await readPCloudFileBytes(
+            env,
+            file.physicalPath,
+            HARD_OFFICE_MAX_BYTES,
+          );
+        } catch (error) {
+          if (error instanceof PCloudContentLimitError) {
+            throw new Error(
+              `Office file at virtual path ${JSON.stringify(file.virtualPath)} exceeds the hard maximum of ${error.allowedBytes} bytes.`,
+            );
+          }
+
+          throw error;
+        }
+
+        if (bytes.byteLength !== size) {
+          throw new Error(
+            "pCloud returned an incomplete or inconsistent Office file body.",
+          );
+        }
+
+        await validateOfficePackage(bytes, format);
+        const resourceUri = await createOfficeResourceUri(
+          file.virtualPath,
+          format.extension,
+        );
+
+        return {
+          content: [
+            {
+              type: "resource",
+              resource: {
+                uri: resourceUri,
+                mimeType: format.mimeType,
+                blob: encodeBytesAsBase64(bytes),
+              },
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown pCloud get_office_content error.",
             },
           ],
         };
