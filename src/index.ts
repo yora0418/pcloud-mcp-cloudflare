@@ -31,10 +31,10 @@ class PCloudApiError extends Error {
   }
 }
 
-class PCloudTextLimitError extends Error {
+class PCloudContentLimitError extends Error {
   constructor(readonly allowedBytes: number) {
-    super(`pCloud text response exceeded ${allowedBytes} bytes.`);
-    this.name = "PCloudTextLimitError";
+    super(`pCloud content response exceeded ${allowedBytes} bytes.`);
+    this.name = "PCloudContentLimitError";
   }
 }
 
@@ -46,6 +46,27 @@ const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
 const HARD_READ_MAX_BYTES = 1024 * 1024;
+const HARD_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+type SupportedImageMimeType = "image/png" | "image/jpeg";
+type SupportedImageFormat = {
+  mimeType: SupportedImageMimeType;
+  extensions: ReadonlySet<string>;
+  signature: readonly number[];
+};
+
+const SUPPORTED_IMAGE_FORMATS: readonly SupportedImageFormat[] = [
+  {
+    mimeType: "image/png",
+    extensions: new Set([".png"]),
+    signature: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  },
+  {
+    mimeType: "image/jpeg",
+    extensions: new Set([".jpg", ".jpeg"]),
+    signature: [0xff, 0xd8, 0xff],
+  },
+];
 
 const TEXT_MIME_TYPES = new Set([
   "application/ecmascript",
@@ -636,13 +657,91 @@ function isSupportedTextFile(name: string, contentType?: string): boolean {
   );
 }
 
+function getExpectedImageFormat(
+  name: string,
+  contentType: string | undefined,
+  virtualPath: string,
+): SupportedImageFormat {
+  const mimeType = normalizeMimeType(contentType);
+  const metadataFormat = SUPPORTED_IMAGE_FORMATS.find(
+    (format) => format.mimeType === mimeType,
+  );
+  if (metadataFormat) {
+    return metadataFormat;
+  }
+
+  if (GENERIC_MIME_TYPES.has(mimeType)) {
+    const extension = getFileExtension(name);
+    const extensionFormat = SUPPORTED_IMAGE_FORMATS.find((format) =>
+      format.extensions.has(extension),
+    );
+    if (extensionFormat) {
+      return extensionFormat;
+    }
+  }
+
+  throw new Error(
+    `File at virtual path ${JSON.stringify(virtualPath)} is not a supported PNG or JPEG image.`,
+  );
+}
+
+function hasByteSignature(
+  bytes: Uint8Array,
+  signature: readonly number[],
+): boolean {
+  return (
+    bytes.byteLength >= signature.length &&
+    signature.every((byte, index) => bytes[index] === byte)
+  );
+}
+
+function detectSupportedImageMimeType(
+  bytes: Uint8Array,
+): SupportedImageMimeType | undefined {
+  return SUPPORTED_IMAGE_FORMATS.find((format) =>
+    hasByteSignature(bytes, format.signature),
+  )?.mimeType;
+}
+
+function encodeBytesAsBase64(bytes: Uint8Array): string {
+  const binaryChunks: string[] = [];
+  const chunkSize = 32 * 1024;
+
+  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+    binaryChunks.push(
+      String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)),
+    );
+  }
+
+  return btoa(binaryChunks.join(""));
+}
+
 async function readResponseBytesWithinLimit(
   response: Response,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  const contentLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new PCloudTextLimitError(maxBytes);
+  const contentLengthHeader = response.headers.get("content-length");
+  if (contentLengthHeader !== null) {
+    const normalizedContentLength = contentLengthHeader.trim();
+    if (!/^(?:0|[1-9]\d*)$/.test(normalizedContentLength)) {
+      throw new Error("pCloud returned an invalid Content-Length header.");
+    }
+
+    const contentLength = Number(normalizedContentLength);
+    if (!Number.isSafeInteger(contentLength)) {
+      throw new Error("pCloud returned an invalid Content-Length header.");
+    }
+
+    if (contentLength > maxBytes) {
+      try {
+        await response.body?.cancel(
+          "pCloud content response exceeded the byte limit.",
+        );
+      } catch {
+        // The size limit error below remains the relevant failure.
+      }
+      throw new PCloudContentLimitError(maxBytes);
+    }
   }
 
   if (!response.body) {
@@ -663,11 +762,13 @@ async function readResponseBytesWithinLimit(
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
         try {
-          await reader.cancel("pCloud text response exceeded the byte limit.");
+          await reader.cancel(
+            "pCloud content response exceeded the byte limit.",
+          );
         } catch {
           // The size limit error below remains the relevant failure.
         }
-        throw new PCloudTextLimitError(maxBytes);
+        throw new PCloudContentLimitError(maxBytes);
       }
 
       chunks.push(value);
@@ -686,14 +787,7 @@ async function readResponseBytesWithinLimit(
   return bytes;
 }
 
-async function readPCloudText(
-  env: Env,
-  physicalPath: string,
-  maxBytes: number,
-): Promise<{ text: string; byteLength: number }> {
-  const contentUrl = await getPCloudFileContentUrl(env, physicalPath);
-  const response = await fetchPCloudFileContent(contentUrl);
-
+function validatePCloudContentResponse(response: Response): void {
   if (!response.ok) {
     throw new Error(`pCloud content HTTP error ${response.status}.`);
   }
@@ -714,8 +808,25 @@ async function readPCloudText(
       throw new PCloudApiError(String(errorCode));
     }
   }
+}
 
-  const bytes = await readResponseBytesWithinLimit(response, maxBytes);
+async function readPCloudFileBytes(
+  env: Env,
+  physicalPath: string,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const contentUrl = await getPCloudFileContentUrl(env, physicalPath);
+  const response = await fetchPCloudFileContent(contentUrl);
+  validatePCloudContentResponse(response);
+  return readResponseBytesWithinLimit(response, maxBytes);
+}
+
+async function readPCloudText(
+  env: Env,
+  physicalPath: string,
+  maxBytes: number,
+): Promise<{ text: string; byteLength: number }> {
+  const bytes = await readPCloudFileBytes(env, physicalPath, maxBytes);
   let text: string;
 
   try {
@@ -1075,6 +1186,99 @@ function createServer(env: Env) {
   );
 
   server.registerTool(
+    "get_image_content",
+    {
+      description:
+        "Return a PNG or JPEG file directly as MCP ImageContent after validating its exact virtual path, file metadata, binary signature, and 5 MiB source-file limit. This tool is read-only.",
+      inputSchema: {
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            "Required virtual absolute PNG or JPEG path. File IDs are not accepted.",
+          ),
+      },
+    },
+    async ({ path }) => {
+      try {
+        const file = await statVirtualFile(env, path);
+        const name = getVirtualFileName(file.metadata, file.virtualPath);
+        if (!name.trim()) {
+          throw new Error("pCloud stat returned invalid image metadata.");
+        }
+
+        const contentType = optionalString(file.metadata.contenttype);
+        const size = getFileSize(file.metadata, file.virtualPath);
+        const expectedFormat = getExpectedImageFormat(
+          name,
+          contentType,
+          file.virtualPath,
+        );
+
+        if (size > HARD_IMAGE_MAX_BYTES) {
+          throw new Error(
+            `Image at virtual path ${JSON.stringify(file.virtualPath)} is ${size} bytes, which exceeds the hard maximum of ${HARD_IMAGE_MAX_BYTES} bytes.`,
+          );
+        }
+
+        let bytes: Uint8Array;
+        try {
+          bytes = await readPCloudFileBytes(
+            env,
+            file.physicalPath,
+            HARD_IMAGE_MAX_BYTES,
+          );
+        } catch (error) {
+          if (error instanceof PCloudContentLimitError) {
+            throw new Error(
+              `Image at virtual path ${JSON.stringify(file.virtualPath)} exceeds the hard maximum of ${error.allowedBytes} bytes.`,
+            );
+          }
+
+          throw error;
+        }
+
+        if (bytes.byteLength !== size) {
+          throw new Error(
+            "pCloud returned an incomplete or inconsistent image body.",
+          );
+        }
+
+        const detectedMimeType = detectSupportedImageMimeType(bytes);
+        if (detectedMimeType !== expectedFormat.mimeType) {
+          throw new Error(
+            "pCloud returned image content that does not match the expected PNG or JPEG format.",
+          );
+        }
+
+        return {
+          content: [
+            {
+              type: "image",
+              data: encodeBytesAsBase64(bytes),
+              mimeType: detectedMimeType,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown pCloud get_image_content error.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
     "read_file",
     {
       description:
@@ -1126,7 +1330,7 @@ function createServer(env: Env) {
             allowedBytes,
           );
         } catch (error) {
-          if (error instanceof PCloudTextLimitError) {
+          if (error instanceof PCloudContentLimitError) {
             throw new Error(
               `UTF-8 content for virtual path ${JSON.stringify(file.virtualPath)} exceeds the allowed maximum of ${error.allowedBytes} bytes.`,
             );
