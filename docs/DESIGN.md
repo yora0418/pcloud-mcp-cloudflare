@@ -36,6 +36,7 @@ Allowed capabilities:
 - search file/folder metadata and virtual paths
 - retrieve file metadata
 - read supported file contents
+- retrieve supported image content
 
 Explicitly out of scope for v1:
 
@@ -173,6 +174,17 @@ Retrieve a supported text file by virtual path while applying the same virtual-r
 - rejects folders, binary formats, unsupported types, non-UTF-8 text, oversized files, and partial reads; support for additional text encodings may be added later
 - does not expose physical paths, temporary download URLs, or caller-supplied file-ID access
 
+### `get_image_content`
+
+Retrieve a supported image by exact virtual path and return it directly as MCP ImageContent. The initial implementation:
+
+- supports canonical `image/png` and `image/jpeg` metadata
+- permits `.png`, `.jpg`, and `.jpeg` fallback only when pCloud reports a generic MIME type
+- verifies PNG or JPEG binary signatures after download and rejects mismatches
+- enforces a 5 MiB source-file hard limit independently of the `read_file` text limits
+- uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as `read_file`
+- does not expose physical paths, temporary download URLs, file contents in logs, or caller-supplied file-ID access
+
 ## pCloud-specific implementation notes
 
 Implementation must account for pCloud's API/OAuth behavior, including regional API host handling where required.
@@ -275,6 +287,12 @@ Rationale under consideration: if modified versions are offered to other users a
 - add file type and size limits
 - enforce the same virtual-root boundary for both tools
 - validate metadata and bounded UTF-8 reading against a real pCloud account through a deployed Cloudflare Worker and ChatGPT MCP
+
+### Phase 6 — image content — implementation complete, integration validation pending
+
+- implement `get_image_content` for PNG and JPEG files
+- return bounded image bytes directly as MCP ImageContent
+- enforce metadata, binary-signature, source-size, and virtual-root checks
 
 ### Later
 
