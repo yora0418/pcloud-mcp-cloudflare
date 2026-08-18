@@ -168,9 +168,10 @@ Retrieve a supported text file by virtual path while applying the same virtual-r
 - defaults to a complete-file limit of 256 KiB and allows at most 1 MiB
 - checks pCloud metadata for file type and size before retrieving content
 - allows text MIME types and a conservative extension fallback for generic MIME types
-- requests UTF-8 output from pCloud and enforces the byte limit while receiving it
-- rejects folders, binary formats, unsupported types, oversized files, and partial reads
-- does not expose physical paths, download URLs, or caller-supplied file-ID access
+- obtains a temporary content request through `getfilelink` and accepts only HTTPS content hosts matching `*.pcloud.com`
+- fetches raw bytes without following redirects, enforces the byte limit while receiving them, and decodes them strictly as UTF-8
+- rejects folders, binary formats, unsupported types, non-UTF-8 text, oversized files, and partial reads; support for additional text encodings may be added later
+- does not expose physical paths, temporary download URLs, or caller-supplied file-ID access
 
 ## pCloud-specific implementation notes
 

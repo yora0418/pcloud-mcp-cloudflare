@@ -42,6 +42,7 @@ const ALLOWED_PCLOUD_API_HOSTS = new Set([
   "api.pcloud.com",
   "eapi.pcloud.com",
 ]);
+const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
 const HARD_READ_MAX_BYTES = 1024 * 1024;
@@ -223,29 +224,176 @@ async function fetchPCloud(
   }
 }
 
-async function fetchPCloudTextFile(
+function parsePCloudResultCode(value: unknown): number {
+  let result: number;
+
+  if (typeof value === "number") {
+    result = value;
+  } else if (
+    typeof value === "string" &&
+    /^(?:0|[1-9]\d*)$/.test(value)
+  ) {
+    result = Number(value);
+  } else {
+    throw new Error("pCloud returned an invalid result code.");
+  }
+
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new Error("pCloud returned an invalid result code.");
+  }
+
+  return result;
+}
+
+function isNonEmptyStringArray(
+  value: unknown,
+): value is [string, ...string[]] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (item: unknown) => typeof item === "string" && item.trim().length > 0,
+    )
+  );
+}
+
+function normalizePCloudContentHost(value: string): string {
+  if (
+    value !== value.trim() ||
+    !value ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(`https://${value}`);
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    hostname !== value.toLowerCase() ||
+    !hostname.endsWith(PCLOUD_CONTENT_HOST_SUFFIX)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  return hostname;
+}
+
+function buildPCloudContentUrl(host: string, path: string): URL {
+  if (
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.includes("\\") ||
+    /[\u0000-\u001f\u007f]/.test(path)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(`https://${host}${path}`);
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== host ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  return url;
+}
+
+async function getPCloudFileContentUrl(
   env: Env,
   physicalPath: string,
-): Promise<Response> {
+): Promise<URL> {
   const { accessToken, apiHost } = getPCloudConfig(env);
-  const url = new URL(`https://${apiHost}/gettextfile`);
+  const url = new URL(`https://${apiHost}/getfilelink`);
   const body = new URLSearchParams({
     path: physicalPath,
-    toencoding: "utf-8",
     access_token: accessToken,
+    forcedownload: "1",
+    skipfilename: "1",
   });
 
+  let response: Response;
   try {
-    return await fetch(url, {
+    response = await fetch(url, {
       method: "POST",
       headers: {
-        Accept: "text/plain, */*;q=0.1",
+        Accept: "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body,
+      redirect: "manual",
     });
   } catch {
-    throw new Error("pCloud request failed before a response was received.");
+    throw new Error(
+      "pCloud getfilelink request failed before a response was received.",
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(`pCloud getfilelink HTTP error ${response.status}.`);
+  }
+
+  let rawData: unknown;
+  try {
+    rawData = await response.json();
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid JSON response.");
+  }
+
+  if (!isRecord(rawData)) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const result = parsePCloudResultCode(rawData.result);
+  if (result !== 0) {
+    throw new PCloudApiError(String(result));
+  }
+
+  const hosts = rawData.hosts;
+  if (
+    !isNonEmptyStringArray(hosts) ||
+    typeof rawData.path !== "string"
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const contentHost = normalizePCloudContentHost(hosts[0]);
+  return buildPCloudContentUrl(contentHost, rawData.path);
+}
+
+async function fetchPCloudFileContent(url: URL): Promise<Response> {
+  try {
+    return await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+    });
+  } catch {
+    throw new Error(
+      "pCloud content request failed before a response was received.",
+    );
   }
 }
 
@@ -543,10 +691,11 @@ async function readPCloudText(
   physicalPath: string,
   maxBytes: number,
 ): Promise<{ text: string; byteLength: number }> {
-  const response = await fetchPCloudTextFile(env, physicalPath);
+  const contentUrl = await getPCloudFileContentUrl(env, physicalPath);
+  const response = await fetchPCloudFileContent(contentUrl);
 
   if (!response.ok) {
-    throw new Error(`pCloud HTTP error ${response.status}.`);
+    throw new Error(`pCloud content HTTP error ${response.status}.`);
   }
 
   const errorHeader = response.headers.get("X-Error");
