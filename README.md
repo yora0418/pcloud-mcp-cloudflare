@@ -79,6 +79,16 @@ It does **not** search inside file contents.
 - Remote MCP over HTTP
 - pCloud OAuth / API
 
+## Development
+
+The repository is developed as if its tracked history were already public.
+
+- `AGENTS.md` contains repository-wide guidance for coding agents.
+- `docs/DEVELOPMENT.md` describes the contributor/agent workflow, local-only overrides, validation expectations, and public-ready Git practices.
+- `docs/DESIGN.md` records architecture, security boundaries, and development phases.
+
+Private task prompts, machine-specific notes, credentials, and deployment-specific values should remain outside tracked files.
+
 ## License
 
 License is not finalized yet. AGPL-3.0 is currently the leading candidate.
