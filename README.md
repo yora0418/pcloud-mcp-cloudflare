@@ -91,6 +91,7 @@ The repository is developed as if its tracked history were already public.
 - `AGENTS.md` contains repository-wide guidance for coding agents.
 - `docs/DEVELOPMENT.md` describes the contributor/agent workflow, local-only overrides, validation expectations, and public-ready Git practices.
 - `docs/DESIGN.md` records architecture, security boundaries, and development phases.
+- `EXPERIMENT_*.md` files record dated experiments and interoperability findings separately from permanent design decisions. See `EXPERIMENT_20260818_chatgpt_mcp_content_compatibility.md` for the ChatGPT MCP content-delivery observations from 2026-08-18.
 
 Private task prompts, machine-specific notes, credentials, and deployment-specific values should remain outside tracked files.
 
