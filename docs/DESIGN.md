@@ -159,11 +159,18 @@ Possible future evolution:
 
 ### `get_file_info`
 
-Return metadata for a specific file while enforcing the same virtual-root boundary.
+Return normalized metadata for a specific virtual file path while enforcing the same virtual-root boundary. The tool is path-only, rejects folders, and may include bounded image, audio, or video metadata supplied by pCloud. It does not expose the physical pCloud path.
 
 ### `read_file`
 
-Retrieve supported file contents while applying the same virtual-root boundary plus practical size/type limits.
+Retrieve a supported text file by virtual path while applying the same virtual-root boundary. The initial implementation:
+
+- defaults to a complete-file limit of 256 KiB and allows at most 1 MiB
+- checks pCloud metadata for file type and size before retrieving content
+- allows text MIME types and a conservative extension fallback for generic MIME types
+- requests UTF-8 output from pCloud and enforces the byte limit while receiving it
+- rejects folders, binary formats, unsupported types, oversized files, and partial reads
+- does not expose physical paths, download URLs, or caller-supplied file-ID access
 
 ## pCloud-specific implementation notes
 
@@ -260,7 +267,7 @@ Rationale under consideration: if modified versions are offered to other users a
 - validate behavior and performance against a real pCloud tree
 - confirm MCP clients can discover and invoke the added search tool after refreshing the connector/tool metadata
 
-### Phase 5 — file metadata and reading
+### Phase 5 — file metadata and reading — complete
 
 - implement `get_file_info`
 - implement `read_file`
