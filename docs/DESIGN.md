@@ -33,7 +33,7 @@ The initial version is intentionally read-only.
 Allowed capabilities:
 
 - list folders
-- search file metadata / paths
+- search file/folder metadata and virtual paths
 - retrieve file metadata
 - read supported file contents
 
@@ -75,7 +75,13 @@ Goals of this choice:
 - no user access tokens are stored by YoraLAB
 - no YoraLAB credential needs to be distributed to self-hosted instances
 - the initial implementation stays simple
-- OAuth onboarding work is deferred until there is evidence that users actually need it
+- shared OAuth onboarding work is deferred until there is evidence that users actually need it
+
+The Worker uses:
+
+- `PCLOUD_ACCESS_TOKEN` as a secret
+- `PCLOUD_API_HOST` as deployment configuration (`api.pcloud.com` for US or `eapi.pcloud.com` for EU)
+- optional `PCLOUD_ROOT_PATH` as the physical pCloud folder exposed as the MCP-visible `/`
 
 ### Future possibility: shared OAuth application
 
@@ -90,19 +96,59 @@ This has **not** been investigated in enough depth for the initial release. Open
 
 This is deliberately deferred. Contributions and experiments are welcome. If someone implements this in a fork, publishing the source and contributing the work upstream is encouraged.
 
+## Virtual root / scope boundary
+
+A deployment may set `PCLOUD_ROOT_PATH` to expose only a subtree of the pCloud account.
+
+Example:
+
+```text
+PCLOUD_ROOT_PATH=/Sync
+```
+
+Then MCP-visible paths are mapped as follows:
+
+```text
+MCP /              -> pCloud /Sync
+MCP /Documents     -> pCloud /Sync/Documents
+MCP /Music/Album   -> pCloud /Sync/Music/Album
+```
+
+This is a security and usability boundary, not merely a default folder.
+
+Rules:
+
+- all path-based tools resolve virtual paths beneath `PCLOUD_ROOT_PATH`
+- virtual paths must be absolute and cannot contain empty, `.` or `..` segments
+- when `PCLOUD_ROOT_PATH` is a subfolder, direct `folderId` access is disabled in `list_folder` so an ID cannot bypass the scoped root
+- tool responses expose virtual paths rather than the physical root prefix
+- future tools such as `get_file_info` and `read_file` must use the same path-resolution boundary
+
+If `PCLOUD_ROOT_PATH` is unset, `/` means the real pCloud root for backward compatibility and general self-hosted use.
+
 ## MCP tool design
 
 The MCP surface should be small and task-oriented rather than mirroring the full pCloud API.
 
-Initial tools:
-
 ### `list_folder`
 
-List entries in a folder. Support root access and folder identifiers/paths as appropriate.
+List entries in a folder. Paths are virtual paths relative to the configured MCP root.
+
+For scoped deployments, direct folder IDs are not accepted because they could bypass the virtual-root boundary.
 
 ### `search_files`
 
-Search files by metadata such as name and path. The first version does not require full-text indexing.
+Search file/folder metadata under a virtual path. The initial implementation is intentionally metadata-only:
+
+- case-insensitive substring matching
+- file/folder names
+- reconstructed virtual relative paths
+- optional folder matches
+- bounded returned result count
+
+pCloud's documented API does not expose a dedicated general filename search method. The initial implementation therefore uses `listfolder` with recursive listing and searches the returned metadata tree in the Worker.
+
+This is **not** full-text content search.
 
 Possible future evolution:
 
@@ -113,23 +159,27 @@ Possible future evolution:
 
 ### `get_file_info`
 
-Return metadata for a specific file.
+Return metadata for a specific file while enforcing the same virtual-root boundary.
 
 ### `read_file`
 
-Retrieve supported file contents while applying practical size/type limits.
+Retrieve supported file contents while applying the same virtual-root boundary plus practical size/type limits.
 
 ## pCloud-specific implementation notes
 
 Implementation must account for pCloud's API/OAuth behavior, including regional API host handling where required.
 
+The pCloud root folder has folder ID `0`, but scoped deployments intentionally avoid treating that physical root as the MCP root.
+
+pCloud supports recursive `listfolder`; recursive results contain nested folder `contents`. Recursive metadata may omit full paths, so the MCP reconstructs virtual paths from folder names while walking the tree.
+
 Existing open-source pCloud MCP implementations may be used as references for pCloud-specific API behavior, but this project is a new Cloudflare Workers-oriented implementation rather than a fork of a server-based MCP implementation.
 
 ## Cloudflare design
 
-The project should target Cloudflare Workers directly rather than requiring a long-running server or container.
+The project targets Cloudflare Workers directly rather than requiring a long-running server or container.
 
-Planned characteristics:
+Characteristics:
 
 - stateless remote MCP endpoint where practical
 - Cloudflare Access in front of the production Worker
@@ -157,7 +207,7 @@ User's pCloud account
 
 YoraLAB provides the software; YoraLAB does not host users' personal pCloud access in the initial model.
 
-The developer's own production instance should likewise run in the developer's personal Cloudflare account rather than the YoraLAB public-service account.
+The developer's own production instance likewise runs in the developer's personal Cloudflare account rather than the YoraLAB public-service account.
 
 ## Repository visibility
 
@@ -175,42 +225,46 @@ Rationale under consideration: if modified versions are offered to other users a
 
 - create the Cloudflare Workers project
 - expose a minimal remote MCP endpoint
-- add a harmless test tool such as `hello`
+- add a harmless `hello` test tool
 - verify with an MCP inspector/client
 
 ### Phase 1 — AI client connectivity — complete
 
-- connect ChatGPT or another compatible remote MCP client
+- connect ChatGPT
 - verify that the test tool can be discovered and called
 
-### Phase 1A — MCP endpoint protection — in progress
+### Phase 1A — MCP endpoint protection — complete
 
 - protect the Worker with Cloudflare Access
 - enable Managed OAuth
 - validate `Cf-Access-Jwt-Assertion` inside the Worker
-- verify authenticated access with an MCP inspector and ChatGPT
+- verify authenticated access with MCP Inspector and ChatGPT
 
-### Phase 2 — pCloud OAuth
+### Phase 2 — pCloud OAuth — complete for developer instance
 
 - configure the developer's pCloud application credentials
 - complete OAuth
-- securely persist the resulting credentials/token needed by the Worker
+- store the pCloud access token as a Cloudflare secret
+- configure the regional pCloud API host
 
-### Phase 3 — basic pCloud read access
+### Phase 3 — basic pCloud read access — complete
 
 - implement `list_folder`
-- retrieve the pCloud root through MCP
+- retrieve the pCloud root through ChatGPT
+- add optional scoped virtual root with `PCLOUD_ROOT_PATH`
 
-### Phase 4 — metadata search
+### Phase 4 — metadata search — implementation added, validation pending
 
 - implement `search_files`
-- begin with file/folder metadata and path search
+- recursively search file/folder names and virtual paths beneath the scoped root
+- validate behavior and performance against the developer's real pCloud tree
 
-### Phase 5 — file reading
+### Phase 5 — file metadata and reading
 
 - implement `get_file_info`
 - implement `read_file`
 - add file type and size limits
+- enforce the same virtual-root boundary for both tools
 
 ### Later
 
