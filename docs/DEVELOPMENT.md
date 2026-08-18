@@ -89,6 +89,24 @@ Instead:
 
 Before changing repository visibility, perform a separate history and secret review.
 
+## Commit messages and Git actions
+
+Commit messages are part of the public history and should be written with the same care as tracked documentation.
+
+Use concise, neutral, project-focused commit messages that describe the technical change. Do not include:
+
+- credentials, tokens, authorization codes, or private deployment values
+- account IDs or private email addresses
+- machine-specific paths
+- personal pCloud filenames or other private user data
+- raw debugging output or temporary investigation details
+- task transcripts, private prompts, or conversation context
+- unnecessary references to the coding agent, reviewer, or private collaboration workflow
+
+When a commit is explicitly requested, review the staged diff for accidental secrets and private deployment values before committing.
+
+A normal implementation task does not imply permission to commit or push. Unless the current task explicitly authorizes the relevant Git operation, leave changes uncommitted and do not push, amend, rebase, rewrite history, or force-push.
+
 ## Local setup
 
 Install dependencies:
