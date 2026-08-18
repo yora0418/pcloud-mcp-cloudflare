@@ -59,16 +59,6 @@ const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
 const ZIP_END_OF_CENTRAL_DIRECTORY_BYTES = 22;
 const ZIP_MAX_COMMENT_BYTES = 0xffff;
-const ZIP_CRC32_TABLE = Array.from({ length: 256 }, (_, tableIndex) => {
-  let value = tableIndex;
-  for (let bit = 0; bit < 8; bit += 1) {
-    value =
-      (value & 1) !== 0
-        ? 0xedb88320 ^ (value >>> 1)
-        : value >>> 1;
-  }
-  return value >>> 0;
-});
 
 type SupportedOfficeMimeType =
   | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -78,13 +68,6 @@ type SupportedOfficeFormat = {
   extension: ".docx" | ".xlsx" | ".pptx";
   mimeType: SupportedOfficeMimeType;
   mainPart: "word/document.xml" | "xl/workbook.xml" | "ppt/presentation.xml";
-};
-type ValidatedZipEntry = {
-  compressionMethod: 0 | 8;
-  crc32: number;
-  uncompressedSize: number;
-  dataOffset: number;
-  dataEndOffset: number;
 };
 
 const SUPPORTED_OFFICE_FORMATS: readonly SupportedOfficeFormat[] = [
@@ -994,7 +977,7 @@ function validateZipLocalEntry(
   crc32: number,
   compressedSize: number,
   uncompressedSize: number,
-): { start: number; end: number; dataOffset: number; dataEndOffset: number } {
+): { start: number; end: number } {
   if (
     localHeaderOffset + 30 > centralDirectoryOffset ||
     readZipUint32(bytes, localHeaderOffset) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE
@@ -1041,12 +1024,7 @@ function validateZipLocalEntry(
       throw invalidOfficePackageError();
     }
 
-    return {
-      start: localHeaderOffset,
-      end: dataEndOffset,
-      dataOffset,
-      dataEndOffset,
-    };
+    return { start: localHeaderOffset, end: dataEndOffset };
   }
 
   if (
@@ -1067,87 +1045,7 @@ function validateZipLocalEntry(
       compressedSize,
       uncompressedSize,
     ),
-    dataOffset,
-    dataEndOffset,
   };
-}
-
-function updateZipCrc32(value: number, bytes: Uint8Array): number {
-  for (const byte of bytes) {
-    value = ZIP_CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
-  }
-  return value >>> 0;
-}
-
-async function validateZipEntryContent(
-  bytes: Uint8Array,
-  entry: ValidatedZipEntry,
-): Promise<void> {
-  if (entry.compressionMethod === 0) {
-    const content = bytes.subarray(entry.dataOffset, entry.dataEndOffset);
-    const crc32 = (updateZipCrc32(0xffffffff, content) ^ 0xffffffff) >>> 0;
-    if (content.byteLength !== entry.uncompressedSize || crc32 !== entry.crc32) {
-      throw invalidOfficePackageError();
-    }
-    return;
-  }
-
-  const compressedBytes = bytes.subarray(
-    entry.dataOffset,
-    entry.dataEndOffset,
-  );
-  const compressedStream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      if (compressedBytes.byteLength > 0) {
-        controller.enqueue(compressedBytes);
-      }
-      controller.close();
-    },
-  });
-
-  let reader: ReadableStreamDefaultReader<Uint8Array>;
-  try {
-    const decompressor = new DecompressionStream(
-      "deflate-raw",
-    ) as unknown as TransformStream<Uint8Array, Uint8Array>;
-    reader = compressedStream
-      .pipeThrough(decompressor)
-      .getReader();
-  } catch {
-    throw invalidOfficePackageError();
-  }
-
-  let actualSize = 0;
-  let crc32 = 0xffffffff;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      actualSize += value.byteLength;
-      if (actualSize > entry.uncompressedSize) {
-        try {
-          await reader.cancel("OOXML entry exceeded its declared size.");
-        } catch {
-          // The generic package-validation error below remains relevant.
-        }
-        throw invalidOfficePackageError();
-      }
-
-      crc32 = updateZipCrc32(crc32, value);
-    }
-  } catch {
-    throw invalidOfficePackageError();
-  } finally {
-    reader.releaseLock();
-  }
-
-  const finalCrc32 = (crc32 ^ 0xffffffff) >>> 0;
-  if (actualSize !== entry.uncompressedSize || finalCrc32 !== entry.crc32) {
-    throw invalidOfficePackageError();
-  }
 }
 
 function isMacroOfficePart(name: string): boolean {
@@ -1162,10 +1060,10 @@ function isMacroOfficePart(name: string): boolean {
   );
 }
 
-async function validateOfficePackage(
+function validateOfficePackage(
   bytes: Uint8Array,
   format: SupportedOfficeFormat,
-): Promise<void> {
+): void {
   const endOfCentralDirectoryOffset = findZipEndOfCentralDirectory(bytes);
   const diskNumber = readZipUint16(bytes, endOfCentralDirectoryOffset + 4);
   const centralDirectoryDisk = readZipUint16(
@@ -1208,7 +1106,6 @@ async function validateOfficePackage(
   const normalizedEntryNames = new Set<string>();
   const nonEmptyFileNames = new Set<string>();
   const localEntryRanges: Array<{ start: number; end: number }> = [];
-  const zipEntries: ValidatedZipEntry[] = [];
   let totalUncompressedBytes = 0;
   let centralOffset = centralDirectoryOffset;
 
@@ -1278,26 +1175,20 @@ async function validateOfficePackage(
       throw invalidOfficePackageError();
     }
 
-    const localEntry = validateZipLocalEntry(
-      bytes,
-      nameOffset,
-      nameLength,
-      localHeaderOffset,
-      centralDirectoryOffset,
-      generalPurposeFlags,
-      compressionMethod,
-      crc32,
-      compressedSize,
-      uncompressedSize,
+    localEntryRanges.push(
+      validateZipLocalEntry(
+        bytes,
+        nameOffset,
+        nameLength,
+        localHeaderOffset,
+        centralDirectoryOffset,
+        generalPurposeFlags,
+        compressionMethod,
+        crc32,
+        compressedSize,
+        uncompressedSize,
+      ),
     );
-    localEntryRanges.push(localEntry);
-    zipEntries.push({
-      compressionMethod: compressionMethod as 0 | 8,
-      crc32,
-      uncompressedSize,
-      dataOffset: localEntry.dataOffset,
-      dataEndOffset: localEntry.dataEndOffset,
-    });
     centralOffset = nextCentralOffset;
   }
 
@@ -1325,10 +1216,6 @@ async function validateOfficePackage(
     !nonEmptyFileNames.has(format.mainPart)
   ) {
     throw invalidOfficePackageError();
-  }
-
-  for (const entry of zipEntries) {
-    await validateZipEntryContent(bytes, entry);
   }
 }
 
@@ -2079,7 +1966,7 @@ function createServer(env: Env) {
           );
         }
 
-        await validateOfficePackage(bytes, format);
+        validateOfficePackage(bytes, format);
         const resourceUri = await createOfficeResourceUri(
           file.virtualPath,
           format.extension,

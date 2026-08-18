@@ -81,7 +81,7 @@ The default maximum file size is 256 KiB (`262144` bytes). A caller may lower th
 
 `get_image_content` is a separate read-only path for PNG and JPEG files. It accepts an exact virtual path and returns the complete image directly as MCP ImageContent after validating metadata, source size, and the downloaded binary signature. The image source-file hard limit is 5 MiB (`5242880` bytes), independent of the smaller inline UTF-8 text limits used by `read_file`.
 
-`get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker validates a bounded OOXML ZIP structure and checks compressed entry data through bounded streaming; it does not retain or return extracted XML parts. PDF, legacy Office formats, macro-enabled formats, and arbitrary ZIP files are not supported. Live ChatGPT integration validation remains pending.
+`get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker performs bounded ZIP metadata checks for a supported OOXML container and required format-specific parts, but does not decompress entries or perform full ZIP integrity validation. PDF, legacy Office formats, macro-enabled formats, and arbitrary ZIP files are not supported. Live ChatGPT integration validation remains pending.
 
 ## Runtime
 

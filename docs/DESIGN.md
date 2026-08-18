@@ -193,11 +193,11 @@ Retrieve an OOXML Office file by exact virtual path and return its original byte
 - supports `.docx`, `.xlsx`, and `.pptx` with their format-specific MIME types
 - accepts the matching canonical MIME type, or a generic/ZIP container MIME only when the supported extension and bounded OOXML structure also match
 - enforces a 1 MiB source-file hard limit through metadata, `Content-Length`, streaming byte count, and exact metadata/body-size checks
-- validates ZIP end records, central-directory entries, local headers, entry names, compression methods, CRC-32 values, and required OOXML package parts
+- validates ZIP end records, central-directory entries, local headers and ranges, entry names, compression metadata, and required OOXML package parts
 - rejects multi-disk, ZIP64, encrypted, macro-bearing, path-ambiguous, overlapping, extraneously padded, or structurally inconsistent packages
-- checks stored and deflated entry data through bounded streaming, without retaining or returning extracted contents
-- limits packages to 2,048 entries, 16 MiB declared and actual uncompressed bytes per entry, and 32 MiB declared and actual uncompressed bytes in total
+- limits packages to 2,048 entries, 16 MiB declared uncompressed bytes per entry, and 32 MiB declared uncompressed bytes in total to reject obvious expansion hazards without decompressing entries
 - requires `[Content_Types].xml`, `_rels/.rels`, and the format-specific main part (`word/document.xml`, `xl/workbook.xml`, or `ppt/presentation.xml`)
+- intentionally does not decompress entries, calculate file-data CRC-32 values, parse XML, or act as a complete ZIP integrity checker; those tasks are outside the transport role
 - returns only the original base64-encoded package bytes with the canonical Office MIME type and an opaque custom resource URI; ZIP entries and XML are not returned separately
 - uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as the existing content tools
 - does not support PDF, legacy `.doc`/`.xls`/`.ppt`, macro-enabled Office formats, or arbitrary ZIP retrieval
