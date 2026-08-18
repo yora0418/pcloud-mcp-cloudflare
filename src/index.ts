@@ -295,6 +295,16 @@ function optionalScalarString(value: unknown): string | undefined {
     : undefined;
 }
 
+function optionalHashString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? String(value)
+    : undefined;
+}
+
 function hasDefinedValue(value: Record<string, unknown>): boolean {
   return Object.values(value).some((field) => field !== undefined);
 }
@@ -359,7 +369,7 @@ function normalizeFileMetadata(
     contentType,
     created: optionalString(metadata.created),
     modified: optionalString(metadata.modified),
-    hash: optionalScalarString(metadata.hash),
+    hash: optionalHashString(metadata.hash),
     category,
     icon,
     ...(isImage && hasDefinedValue(image) ? { image } : {}),
@@ -519,6 +529,23 @@ async function readPCloudText(
 
   if (!response.ok) {
     throw new Error(`pCloud HTTP error ${response.status}.`);
+  }
+
+  const errorHeader = response.headers.get("X-Error");
+  if (errorHeader !== null) {
+    const normalizedErrorCode = errorHeader.trim();
+    if (!/^\d+$/.test(normalizedErrorCode)) {
+      throw new Error("pCloud returned an invalid X-Error header.");
+    }
+
+    const errorCode = Number(normalizedErrorCode);
+    if (!Number.isSafeInteger(errorCode)) {
+      throw new Error("pCloud returned an invalid X-Error header.");
+    }
+
+    if (errorCode !== 0) {
+      throw new PCloudApiError(String(errorCode));
+    }
   }
 
   const bytes = await readResponseBytesWithinLimit(response, maxBytes);
