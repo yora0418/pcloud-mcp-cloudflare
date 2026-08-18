@@ -268,12 +268,13 @@ Rationale under consideration: if modified versions are offered to other users a
 - validate behavior and performance against a real pCloud tree
 - confirm MCP clients can discover and invoke the added search tool after refreshing the connector/tool metadata
 
-### Phase 5 — file metadata and reading — implementation complete, integration validation pending
+### Phase 5 — file metadata and reading — complete
 
 - implement `get_file_info`
 - implement `read_file`
 - add file type and size limits
 - enforce the same virtual-root boundary for both tools
+- validate metadata and bounded UTF-8 reading against a real pCloud account through a deployed Cloudflare Worker and ChatGPT MCP
 
 ### Later
 
