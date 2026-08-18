@@ -3,7 +3,8 @@
 **Date:** 2026-08-18  
 **Client:** ChatGPT custom MCP app  
 **Server:** `pcloud-mcp-cloudflare` on Cloudflare Workers  
-**MCP SDK:** `@modelcontextprotocol/server` `2.0.0`
+**MCP SDK:** `@modelcontextprotocol/server` `2.0.0`  
+**Reported to OpenAI:** 2026-08-18 18:32 JST
 
 This document records client-specific interoperability observations discovered while testing MCP content delivery from a real pCloud-backed remote MCP server.
 
