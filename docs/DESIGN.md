@@ -288,11 +288,12 @@ Rationale under consideration: if modified versions are offered to other users a
 - enforce the same virtual-root boundary for both tools
 - validate metadata and bounded UTF-8 reading against a real pCloud account through a deployed Cloudflare Worker and ChatGPT MCP
 
-### Phase 6 — image content — implementation complete, integration validation pending
+### Phase 6 — image content — complete
 
 - implement `get_image_content` for PNG and JPEG files
 - return bounded image bytes directly as MCP ImageContent
 - enforce metadata, binary-signature, source-size, and virtual-root checks
+- validate PNG and JPEG ImageContent delivery through a deployed Worker and ChatGPT Vision
 
 ### Later
 
