@@ -223,6 +223,32 @@ async function fetchPCloud(
   }
 }
 
+async function fetchPCloudTextFile(
+  env: Env,
+  physicalPath: string,
+): Promise<Response> {
+  const { accessToken, apiHost } = getPCloudConfig(env);
+  const url = new URL(`https://${apiHost}/gettextfile`);
+  const body = new URLSearchParams({
+    path: physicalPath,
+    toencoding: "utf-8",
+    access_token: accessToken,
+  });
+
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "text/plain, */*;q=0.1",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+  } catch {
+    throw new Error("pCloud request failed before a response was received.");
+  }
+}
+
 async function callPCloudJson(
   env: Env,
   method: string,
@@ -517,15 +543,7 @@ async function readPCloudText(
   physicalPath: string,
   maxBytes: number,
 ): Promise<{ text: string; byteLength: number }> {
-  const response = await fetchPCloud(
-    env,
-    "gettextfile",
-    {
-      path: physicalPath,
-      toencoding: "utf-8",
-    },
-    "text/plain, */*;q=0.1",
-  );
+  const response = await fetchPCloudTextFile(env, physicalPath);
 
   if (!response.ok) {
     throw new Error(`pCloud HTTP error ${response.status}.`);
