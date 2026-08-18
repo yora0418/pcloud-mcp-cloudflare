@@ -23,6 +23,18 @@ Treat every tracked file and commit as if the repository were already public.
 
 Do not commit credentials, tokens, authorization codes, private deployment values, private file contents, task transcripts, or machine-specific notes. Generic configuration variable names may be documented, but developer-specific values must stay outside Git.
 
+## Git and commit hygiene
+
+Treat commit titles and bodies as public-facing project documentation.
+
+- Keep commit messages concise, neutral, and focused on the repository change itself.
+- Do not put secrets, tokens, authorization codes, account IDs, private email addresses, machine-specific paths, personal pCloud filenames, private deployment values, debugging dumps, task transcripts, or conversation context in commit messages.
+- Do not describe a change using private user context when a generic technical description is sufficient.
+- Do not mention temporary agent instructions or private collaboration details in commit messages.
+- Before creating a requested commit, review the staged diff for accidental secrets or private deployment details.
+- Do not create commits, push branches, amend commits, rebase, rewrite history, or force-push unless the current task explicitly authorizes that Git action.
+- If committing was not explicitly requested, leave the implementation changes uncommitted and report the working-tree state instead.
+
 ## Deployment safety
 
 Do not deploy or change external account configuration unless the user explicitly asks for that action in the current task. Code changes and local validation should not implicitly trigger deployment.
