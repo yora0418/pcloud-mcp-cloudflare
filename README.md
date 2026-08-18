@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** Functional private prototype. Authenticated ChatGPT connectivity, pCloud OAuth, folder listing, scoped virtual roots, and metadata search are implemented. The repository is still private while the initial feature set and security review are completed.
+> **Status:** Functional private prototype. Authenticated ChatGPT connectivity, pCloud OAuth, folder listing, scoped virtual roots, metadata search, file metadata, and bounded text reading are implemented. The repository is still private while the initial feature set and security review are completed.
 
 ## Goals
 
@@ -18,11 +18,8 @@ A serverless, read-only remote MCP server for pCloud, designed to run on Cloudfl
 - `hello` — connectivity test
 - `list_folder` — list a virtual folder
 - `search_files` — metadata-only search across names and virtual paths
-
-Planned next tools:
-
-- `get_file_info`
-- `read_file`
+- `get_file_info` — retrieve normalized metadata for an exact virtual file path
+- `read_file` — read a supported text file at an exact virtual path
 
 The initial release will **not** provide upload, delete, move, rename, folder creation, or sharing operations.
 
@@ -71,6 +68,14 @@ If `PCLOUD_ROOT_PATH` is unset, the real pCloud root remains visible as `/`.
 `search_files` currently performs metadata search only. It uses pCloud recursive folder listing, walks the returned tree in the Worker, and performs case-insensitive substring matching against names and reconstructed virtual paths.
 
 It does **not** search inside file contents.
+
+## File metadata and text reading
+
+`get_file_info` uses an exact virtual path and returns selected file metadata, including available image, audio, or video details. It does not accept a caller-supplied file ID, and it never returns the hidden physical root prefix.
+
+`read_file` is text-only. It accepts supported text MIME types and a conservative text-extension allowlist when pCloud reports a generic MIME type. Binary and unsupported formats are rejected before their contents are fetched. It retrieves raw file bytes through a temporary pCloud content link and decodes them strictly as UTF-8; non-UTF-8 text is rejected. Support for additional encodings may be added later.
+
+The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received.
 
 ## Runtime
 

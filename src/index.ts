@@ -21,13 +21,82 @@ type PCloudMetadata = Record<string, unknown> & {
 
 type PCloudJsonResponse = {
   result?: number | string;
-  error?: string;
   metadata?: PCloudMetadata;
 };
+
+class PCloudApiError extends Error {
+  constructor(readonly resultCode: string) {
+    super(`pCloud API request failed with result code ${resultCode}.`);
+    this.name = "PCloudApiError";
+  }
+}
+
+class PCloudTextLimitError extends Error {
+  constructor(readonly allowedBytes: number) {
+    super(`pCloud text response exceeded ${allowedBytes} bytes.`);
+    this.name = "PCloudTextLimitError";
+  }
+}
 
 const ALLOWED_PCLOUD_API_HOSTS = new Set([
   "api.pcloud.com",
   "eapi.pcloud.com",
+]);
+const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
+
+const DEFAULT_READ_MAX_BYTES = 256 * 1024;
+const HARD_READ_MAX_BYTES = 1024 * 1024;
+
+const TEXT_MIME_TYPES = new Set([
+  "application/ecmascript",
+  "application/javascript",
+  "application/json",
+  "application/markdown",
+  "application/sql",
+  "application/toml",
+  "application/x-javascript",
+  "application/x-markdown",
+  "application/x-yaml",
+  "application/xml",
+  "application/yaml",
+]);
+
+const GENERIC_MIME_TYPES = new Set([
+  "",
+  "application/octet-stream",
+  "application/unknown",
+  "application/x-empty",
+  "binary/octet-stream",
+]);
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".bat",
+  ".cfg",
+  ".cmd",
+  ".conf",
+  ".css",
+  ".csv",
+  ".htm",
+  ".html",
+  ".ini",
+  ".js",
+  ".json",
+  ".jsx",
+  ".log",
+  ".markdown",
+  ".md",
+  ".ps1",
+  ".py",
+  ".sh",
+  ".sql",
+  ".toml",
+  ".ts",
+  ".tsv",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
 ]);
 
 function normalizePCloudApiHost(value: string): string {
@@ -130,11 +199,12 @@ function relativeSearchPath(basePath: string, fullPath: string): string {
   return fullPath;
 }
 
-async function callPCloudJson(
+async function fetchPCloud(
   env: Env,
   method: string,
   params: Record<string, string>,
-): Promise<PCloudJsonResponse> {
+  accept: string,
+): Promise<Response> {
   const { accessToken, apiHost } = getPCloudConfig(env);
   const url = new URL(`https://${apiHost}/${method}`);
 
@@ -142,24 +212,227 @@ async function callPCloudJson(
     url.searchParams.set(key, value);
   }
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-    },
+  try {
+    return await fetch(url, {
+      headers: {
+        Accept: accept,
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+  } catch {
+    throw new Error("pCloud request failed before a response was received.");
+  }
+}
+
+function parsePCloudResultCode(value: unknown): number {
+  let result: number;
+
+  if (typeof value === "number") {
+    result = value;
+  } else if (
+    typeof value === "string" &&
+    /^(?:0|[1-9]\d*)$/.test(value)
+  ) {
+    result = Number(value);
+  } else {
+    throw new Error("pCloud returned an invalid result code.");
+  }
+
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new Error("pCloud returned an invalid result code.");
+  }
+
+  return result;
+}
+
+function isNonEmptyStringArray(
+  value: unknown,
+): value is [string, ...string[]] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (item: unknown) => typeof item === "string" && item.trim().length > 0,
+    )
+  );
+}
+
+function normalizePCloudContentHost(value: string): string {
+  if (
+    value !== value.trim() ||
+    !value ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(`https://${value}`);
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    hostname !== value.toLowerCase() ||
+    !hostname.endsWith(PCLOUD_CONTENT_HOST_SUFFIX)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  return hostname;
+}
+
+function buildPCloudContentUrl(host: string, path: string): URL {
+  if (
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.includes("\\") ||
+    /[\u0000-\u001f\u007f]/.test(path)
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(`https://${host}${path}`);
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== host ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  return url;
+}
+
+async function getPCloudFileContentUrl(
+  env: Env,
+  physicalPath: string,
+): Promise<URL> {
+  const { accessToken, apiHost } = getPCloudConfig(env);
+  const url = new URL(`https://${apiHost}/getfilelink`);
+  const body = new URLSearchParams({
+    path: physicalPath,
+    access_token: accessToken,
+    forcedownload: "1",
+    skipfilename: "1",
   });
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+      redirect: "manual",
+    });
+  } catch {
+    throw new Error(
+      "pCloud getfilelink request failed before a response was received.",
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(`pCloud getfilelink HTTP error ${response.status}.`);
+  }
+
+  let rawData: unknown;
+  try {
+    rawData = await response.json();
+  } catch {
+    throw new Error("pCloud getfilelink returned an invalid JSON response.");
+  }
+
+  if (!isRecord(rawData)) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const result = parsePCloudResultCode(rawData.result);
+  if (result !== 0) {
+    throw new PCloudApiError(String(result));
+  }
+
+  const hosts = rawData.hosts;
+  if (
+    !isNonEmptyStringArray(hosts) ||
+    typeof rawData.path !== "string"
+  ) {
+    throw new Error("pCloud getfilelink returned an invalid response.");
+  }
+
+  const contentHost = normalizePCloudContentHost(hosts[0]);
+  return buildPCloudContentUrl(contentHost, rawData.path);
+}
+
+async function fetchPCloudFileContent(url: URL): Promise<Response> {
+  try {
+    return await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+    });
+  } catch {
+    throw new Error(
+      "pCloud content request failed before a response was received.",
+    );
+  }
+}
+
+async function callPCloudJson(
+  env: Env,
+  method: string,
+  params: Record<string, string>,
+): Promise<PCloudJsonResponse> {
+  const response = await fetchPCloud(
+    env,
+    method,
+    params,
+    "application/json",
+  );
 
   if (!response.ok) {
     throw new Error(`pCloud HTTP error ${response.status}.`);
   }
 
-  const data = (await response.json()) as PCloudJsonResponse;
+  const rawData: unknown = await response.json();
+  if (!isRecord(rawData)) {
+    throw new Error("pCloud returned an invalid JSON response.");
+  }
+
+  const data: PCloudJsonResponse = {
+    result:
+      typeof rawData.result === "number" || typeof rawData.result === "string"
+        ? rawData.result
+        : undefined,
+    metadata: isRecord(rawData.metadata) ? rawData.metadata : undefined,
+  };
   const result = Number(data.result ?? 0);
 
-  if (!Number.isFinite(result) || result !== 0) {
-    throw new Error(
-      `pCloud API error ${String(data.result ?? "unknown")}: ${data.error ?? "Unknown pCloud error"}`,
-    );
+  if (!Number.isSafeInteger(result) || result < 0) {
+    throw new Error("pCloud returned an invalid result code.");
+  }
+
+  if (result !== 0) {
+    throw new PCloudApiError(String(result));
   }
 
   return data;
@@ -174,6 +447,287 @@ function getMetadataContents(
 ): Array<Record<string, unknown>> {
   const contents = metadata.contents;
   return Array.isArray(contents) ? contents.filter(isRecord) : [];
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function optionalScalarString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(value)
+    : undefined;
+}
+
+function optionalHashString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? String(value)
+    : undefined;
+}
+
+function hasDefinedValue(value: Record<string, unknown>): boolean {
+  return Object.values(value).some((field) => field !== undefined);
+}
+
+function getVirtualFileName(
+  metadata: Record<string, unknown>,
+  virtualPath: string,
+): string {
+  return (
+    optionalString(metadata.name) ??
+    virtualPath.slice(virtualPath.lastIndexOf("/") + 1)
+  );
+}
+
+function normalizeFileMetadata(
+  metadata: Record<string, unknown>,
+  virtualPath: string,
+) {
+  const contentType = optionalString(metadata.contenttype);
+  const icon = optionalString(metadata.icon);
+  const category = optionalNumber(metadata.category);
+  const normalizedMime = normalizeMimeType(contentType);
+  const isImage =
+    normalizedMime.startsWith("image/") || icon === "image" || category === 1;
+  const isVideo =
+    normalizedMime.startsWith("video/") || icon === "video" || category === 2;
+  const isAudio =
+    !isVideo &&
+    (normalizedMime.startsWith("audio/") || icon === "audio" || category === 3);
+
+  const image = {
+    width: optionalNumber(metadata.width),
+    height: optionalNumber(metadata.height),
+  };
+  const audio = {
+    artist: optionalString(metadata.artist),
+    album: optionalString(metadata.album),
+    title: optionalString(metadata.title),
+    genre: optionalString(metadata.genre),
+    trackNo: optionalScalarString(metadata.trackno),
+    codec: optionalString(metadata.audiocodec),
+    bitrate: optionalNumber(metadata.audiobitrate),
+    sampleRate: optionalNumber(metadata.audiosamplerate),
+  };
+  const video = {
+    width: optionalNumber(metadata.width),
+    height: optionalNumber(metadata.height),
+    duration: optionalScalarString(metadata.duration),
+    fps: optionalScalarString(metadata.fps),
+    codec: optionalString(metadata.videocodec),
+    bitrate: optionalNumber(metadata.videobitrate),
+    audioCodec: optionalString(metadata.audiocodec),
+    audioBitrate: optionalNumber(metadata.audiobitrate),
+    audioSampleRate: optionalNumber(metadata.audiosamplerate),
+  };
+
+  return {
+    name: getVirtualFileName(metadata, virtualPath),
+    path: virtualPath,
+    fileId: optionalScalarString(metadata.fileid),
+    size: optionalNumber(metadata.size),
+    contentType,
+    created: optionalString(metadata.created),
+    modified: optionalString(metadata.modified),
+    hash: optionalHashString(metadata.hash),
+    category,
+    icon,
+    ...(isImage && hasDefinedValue(image) ? { image } : {}),
+    ...(isAudio && hasDefinedValue(audio) ? { audio } : {}),
+    ...(isVideo && hasDefinedValue(video) ? { video } : {}),
+  };
+}
+
+async function statVirtualFile(env: Env, path: string) {
+  const resolved = resolveVirtualPath(env, path);
+  let data: PCloudJsonResponse;
+
+  try {
+    data = await callPCloudJson(env, "stat", {
+      path: resolved.physicalPath,
+    });
+  } catch (error) {
+    if (
+      error instanceof PCloudApiError &&
+      ["2002", "2009", "2010"].includes(error.resultCode)
+    ) {
+      throw new Error(
+        `File not found at virtual path ${JSON.stringify(resolved.virtualPath)}.`,
+      );
+    }
+
+    throw error;
+  }
+
+  const metadata = data.metadata;
+  if (!metadata) {
+    throw new Error("pCloud stat returned no file metadata.");
+  }
+
+  if (metadata.isfolder === true) {
+    throw new Error(
+      `Virtual path ${JSON.stringify(resolved.virtualPath)} is a folder. Use list_folder to browse folders.`,
+    );
+  }
+
+  if (metadata.isfolder !== false) {
+    throw new Error("pCloud stat returned invalid file metadata.");
+  }
+
+  return {
+    virtualPath: resolved.virtualPath,
+    physicalPath: resolved.physicalPath,
+    metadata,
+  };
+}
+
+function getFileSize(
+  metadata: Record<string, unknown>,
+  virtualPath: string,
+): number {
+  const size = optionalNumber(metadata.size);
+  if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
+    throw new Error(
+      `File metadata for virtual path ${JSON.stringify(virtualPath)} does not contain a valid size.`,
+    );
+  }
+
+  return size;
+}
+
+function normalizeMimeType(contentType?: string): string {
+  return contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function getFileExtension(name: string): string {
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex >= 0 ? name.slice(dotIndex).toLowerCase() : "";
+}
+
+function isSupportedTextFile(name: string, contentType?: string): boolean {
+  const mime = normalizeMimeType(contentType);
+
+  if (
+    mime.startsWith("text/") ||
+    TEXT_MIME_TYPES.has(mime) ||
+    mime.endsWith("+json") ||
+    mime.endsWith("+xml")
+  ) {
+    return true;
+  }
+
+  return (
+    GENERIC_MIME_TYPES.has(mime) &&
+    TEXT_FILE_EXTENSIONS.has(getFileExtension(name))
+  );
+}
+
+async function readResponseBytesWithinLimit(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new PCloudTextLimitError(maxBytes);
+  }
+
+  if (!response.body) {
+    return new Uint8Array();
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        try {
+          await reader.cancel("pCloud text response exceeded the byte limit.");
+        } catch {
+          // The size limit error below remains the relevant failure.
+        }
+        throw new PCloudTextLimitError(maxBytes);
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return bytes;
+}
+
+async function readPCloudText(
+  env: Env,
+  physicalPath: string,
+  maxBytes: number,
+): Promise<{ text: string; byteLength: number }> {
+  const contentUrl = await getPCloudFileContentUrl(env, physicalPath);
+  const response = await fetchPCloudFileContent(contentUrl);
+
+  if (!response.ok) {
+    throw new Error(`pCloud content HTTP error ${response.status}.`);
+  }
+
+  const errorHeader = response.headers.get("X-Error");
+  if (errorHeader !== null) {
+    const normalizedErrorCode = errorHeader.trim();
+    if (!/^\d+$/.test(normalizedErrorCode)) {
+      throw new Error("pCloud returned an invalid X-Error header.");
+    }
+
+    const errorCode = Number(normalizedErrorCode);
+    if (!Number.isSafeInteger(errorCode)) {
+      throw new Error("pCloud returned an invalid X-Error header.");
+    }
+
+    if (errorCode !== 0) {
+      throw new PCloudApiError(String(errorCode));
+    }
+  }
+
+  const bytes = await readResponseBytesWithinLimit(response, maxBytes);
+  let text: string;
+
+  try {
+    text = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: false,
+    }).decode(bytes);
+  } catch {
+    throw new Error("pCloud returned content that is not valid UTF-8 text.");
+  }
+
+  return { text, byteLength: bytes.byteLength };
 }
 
 function compactPCloudEntry(
@@ -465,6 +1019,150 @@ function createServer(env: Env) {
                 error instanceof Error
                   ? error.message
                   : "Unknown pCloud search_files error.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_file_info",
+    {
+      description:
+        "Get normalized metadata for a file after its exact virtual path is known. The path stays inside the configured pCloud virtual root, and this tool is read-only.",
+      inputSchema: {
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            "Required virtual absolute file path such as /Documents/example.md. File IDs are not accepted.",
+          ),
+      },
+    },
+    async ({ path }) => {
+      try {
+        const file = await statVirtualFile(env, path);
+        const result = normalizeFileMetadata(
+          file.metadata,
+          file.virtualPath,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown pCloud get_file_info error.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_file",
+    {
+      description:
+        "Read UTF-8 content from a supported text file after its exact virtual path is known. Binary files are rejected. The default file-size limit is 256 KiB and the hard maximum is 1 MiB. This tool is read-only.",
+      inputSchema: {
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            "Required virtual absolute file path such as /Documents/example.md. File IDs are not accepted.",
+          ),
+        maxBytes: z
+          .number()
+          .int()
+          .min(1)
+          .max(HARD_READ_MAX_BYTES)
+          .optional()
+          .describe(
+            "Maximum complete file size allowed for this request. Defaults to 262144 bytes and cannot exceed 1048576 bytes. Partial reads are not returned.",
+          ),
+      },
+    },
+    async ({ path, maxBytes }) => {
+      try {
+        const allowedBytes = maxBytes ?? DEFAULT_READ_MAX_BYTES;
+        const file = await statVirtualFile(env, path);
+        const size = getFileSize(file.metadata, file.virtualPath);
+
+        if (size > allowedBytes) {
+          throw new Error(
+            `File at virtual path ${JSON.stringify(file.virtualPath)} is ${size} bytes, which exceeds the allowed maximum of ${allowedBytes} bytes.`,
+          );
+        }
+
+        const name = getVirtualFileName(file.metadata, file.virtualPath);
+        const contentType = optionalString(file.metadata.contenttype);
+        if (!isSupportedTextFile(name, contentType)) {
+          throw new Error(
+            `File at virtual path ${JSON.stringify(file.virtualPath)} is not a supported text file. Binary and unsupported file content is not returned.`,
+          );
+        }
+
+        let textResult: Awaited<ReturnType<typeof readPCloudText>>;
+        try {
+          textResult = await readPCloudText(
+            env,
+            file.physicalPath,
+            allowedBytes,
+          );
+        } catch (error) {
+          if (error instanceof PCloudTextLimitError) {
+            throw new Error(
+              `UTF-8 content for virtual path ${JSON.stringify(file.virtualPath)} exceeds the allowed maximum of ${error.allowedBytes} bytes.`,
+            );
+          }
+
+          throw error;
+        }
+
+        const result = {
+          name,
+          path: file.virtualPath,
+          size,
+          contentType,
+          encoding: "utf-8",
+          returnedBytes: textResult.byteLength,
+          content: textResult.text,
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown pCloud read_file error.",
             },
           ],
         };
