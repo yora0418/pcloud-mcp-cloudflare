@@ -253,11 +253,12 @@ Rationale under consideration: if modified versions are offered to other users a
 - retrieve the pCloud root through ChatGPT
 - add optional scoped virtual root with `PCLOUD_ROOT_PATH`
 
-### Phase 4 — metadata search — implementation added, validation pending
+### Phase 4 — metadata search — complete
 
 - implement `search_files`
 - recursively search file/folder names and virtual paths beneath the scoped root
-- validate behavior and performance against the developer's real pCloud tree
+- validate behavior and performance against a real pCloud tree
+- confirm MCP clients can discover and invoke the added search tool after refreshing the connector/tool metadata
 
 ### Phase 5 — file metadata and reading
 
