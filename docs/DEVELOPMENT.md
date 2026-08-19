@@ -109,10 +109,10 @@ A normal implementation task does not imply permission to commit or push. Unless
 
 ## Local setup
 
-Install dependencies:
+Install the dependency versions recorded in `package-lock.json`:
 
 ```powershell
-npm.cmd install
+npm.cmd ci
 ```
 
 Run the TypeScript validation used by the project:
@@ -128,6 +128,16 @@ npm.cmd test
 ```
 
 The regression suite builds a temporary Wrangler dry-run bundle and uses only generated JWT keys and mocked pCloud responses. It does not require deployment credentials or contact a pCloud account.
+
+Run the deployment bundle validation without publishing a Worker:
+
+```powershell
+npm.cmd run deploy -- --dry-run
+```
+
+When intentionally changing package metadata or dependencies, use npm to update `package-lock.json`, review the lockfile diff, and repeat a clean `npm.cmd ci`. Do not edit generated lockfile entries by hand.
+
+GitHub Actions runs the same credential-free checks on pushes and pull requests. CI must remain fully mocked and must not receive pCloud, Cloudflare, or deployment credentials.
 
 The PowerShell `.cmd` form is shown because some Windows environments block the `npm.ps1`/`npx.ps1` shims through execution policy.
 

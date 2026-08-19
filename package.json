@@ -1,8 +1,21 @@
 {
   "name": "pcloud-mcp-cloudflare",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Serverless, read-only pCloud remote MCP server for Cloudflare Workers",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yora0418/pcloud-mcp-cloudflare.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yora0418/pcloud-mcp-cloudflare/issues"
+  },
+  "homepage": "https://github.com/yora0418/pcloud-mcp-cloudflare#readme",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "npm@11.13.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

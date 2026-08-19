@@ -15,7 +15,7 @@ Before changing code, read `README.md`, `docs/DESIGN.md`, and `docs/DEVELOPMENT.
 - Path-based tools must not escape the virtual root.
 - Do not add ID-based access that can bypass a scoped virtual root.
 - Return virtual paths rather than the hidden physical root prefix.
-- Future `get_file_info` and `read_file` tools must reuse the same root-boundary rules.
+- All current and future path-based tools must reuse the same root-boundary rules.
 
 ## Public-ready repository policy
 

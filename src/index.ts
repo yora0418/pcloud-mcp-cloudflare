@@ -968,7 +968,7 @@ function compactPCloudEntry(
 function createServer(env: Env) {
   const server = new McpServer({
     name: "pcloud-mcp-cloudflare",
-    version: "0.0.0",
+    version: "0.1.0",
   });
 
   server.registerTool(
