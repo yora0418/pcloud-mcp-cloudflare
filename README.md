@@ -37,7 +37,7 @@ A shared YoraLAB OAuth application may be technically possible and could simplif
 
 Runtime configuration includes:
 
-- `TEAM_DOMAIN` — Cloudflare Access team domain
+- `TEAM_DOMAIN` — Cloudflare Access team origin, `https://<team-name>.cloudflareaccess.com`
 - `POLICY_AUD` — Cloudflare Access Application Audience tag
 - `PCLOUD_API_HOST` — `api.pcloud.com` for US accounts or `eapi.pcloud.com` for EU accounts
 - `PCLOUD_ROOT_PATH` — optional physical pCloud folder exposed as MCP `/`, for example `/Sync`
@@ -75,7 +75,7 @@ It does **not** search inside file contents.
 
 ## File metadata, text reading, image content, and Office content
 
-`get_file_info` uses an exact virtual path and returns selected file metadata, including available image, audio, or video details. It does not accept a caller-supplied file ID, and it never returns the hidden physical root prefix.
+`get_file_info` uses an exact virtual path and returns selected file metadata, including available image, audio, or video details. It does not accept a caller-supplied file ID, and it never returns the hidden physical root prefix. pCloud file and folder IDs in metadata responses are returned only as exact decimal strings; an already-imprecise numeric ID is omitted unless pCloud's canonical string `id` can recover it. Safe numeric sizes retain their numeric representation; exact decimal size strings are preserved when supplied by pCloud, while already-imprecise numeric values are omitted.
 
 `read_file` is text-only. It accepts supported text MIME types and a conservative text-extension allowlist when pCloud reports a generic MIME type. Binary and unsupported formats are rejected before their contents are fetched. It retrieves raw file bytes through a temporary pCloud content link and decodes them strictly as UTF-8; non-UTF-8 text is rejected. Support for additional encodings may be added later.
 
@@ -101,6 +101,8 @@ The repository is developed as if its tracked history were already public.
 - `docs/DESIGN.md` records architecture, security boundaries, and development phases.
 
 Private task prompts, machine-specific notes, credentials, and deployment-specific values should remain outside tracked files.
+
+All registered tools declare MCP read-only, non-destructive, and idempotent annotations. Tools that access pCloud are also marked as open-world because their responses contain externally stored user content. These annotations describe behavior for clients; the Worker continues to enforce the read-only boundary independently.
 
 ## License
 

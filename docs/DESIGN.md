@@ -56,6 +56,8 @@ The production Worker is protected by Cloudflare Access before any pCloud data i
 The Worker also validates the signed JWT supplied by Access in the `Cf-Access-Jwt-Assertion` header. Validation checks:
 
 - the JWT signature against the Cloudflare Access JWKS endpoint
+- `TEAM_DOMAIN` is an HTTPS `<team-name>.cloudflareaccess.com` origin without userinfo, a custom port, path, query, or fragment
+- the JWT signing algorithm is RS256, matching Cloudflare Access signing keys
 - the issuer against the deployment's Cloudflare One team domain
 - the audience against the deployment's Access Application Audience (AUD) tag
 
@@ -132,6 +134,8 @@ If `PCLOUD_ROOT_PATH` is unset, `/` means the real pCloud root for backward comp
 
 The MCP surface should be small and task-oriented rather than mirroring the full pCloud API.
 
+Every tool advertises MCP annotations that describe it as read-only, non-destructive, and idempotent. pCloud-backed tools retain the open-world hint because they retrieve externally stored metadata or content; the local `hello` check is closed-world. These hints support client UX and risk assessment but are not security controls. The Worker enforces the actual read-only and virtual-root boundaries.
+
 ### `list_folder`
 
 List entries in a folder. Paths are virtual paths relative to the configured MCP root.
@@ -207,6 +211,8 @@ Implementation must account for pCloud's API/OAuth behavior, including regional 
 The pCloud root folder has folder ID `0`, but scoped deployments intentionally avoid treating that physical root as the MCP root.
 
 pCloud supports recursive `listfolder`; recursive results contain nested folder `contents`. Recursive metadata may omit full paths, so the MCP reconstructs virtual paths from folder names while walking the tree.
+
+pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
 Existing open-source pCloud MCP implementations may be used as references for pCloud-specific API behavior, but this project is a new Cloudflare Workers-oriented implementation rather than a fork of a server-based MCP implementation.
 

@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
+import { verifyCloudflareAccess } from "./access";
+import {
+  optionalPCloudId,
+  optionalPCloudSize,
+  safePCloudSizeNumber,
+} from "./pcloud-metadata";
 
 type McpHandler = ReturnType<typeof createMcpHandler>;
 type McpBaseEnv = Parameters<McpHandler>[1];
@@ -49,6 +54,18 @@ const HARD_READ_MAX_BYTES = 1024 * 1024;
 const HARD_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const HARD_OFFICE_MAX_BYTES = 1024 * 1024;
 const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
+const LOCAL_READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+const PCLOUD_READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
 
 type SupportedOfficeMimeType =
   | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -594,8 +611,8 @@ function normalizeFileMetadata(
   return {
     name: getVirtualFileName(metadata, virtualPath),
     path: virtualPath,
-    fileId: optionalScalarString(metadata.fileid),
-    size: optionalNumber(metadata.size),
+    fileId: optionalPCloudId(metadata.fileid, metadata.id, "f"),
+    size: optionalPCloudSize(metadata.size),
     contentType,
     created: optionalString(metadata.created),
     modified: optionalString(metadata.modified),
@@ -655,8 +672,8 @@ function getFileSize(
   metadata: Record<string, unknown>,
   virtualPath: string,
 ): number {
-  const size = optionalNumber(metadata.size);
-  if (size === undefined || !Number.isSafeInteger(size) || size < 0) {
+  const size = safePCloudSizeNumber(metadata.size);
+  if (size === undefined) {
     throw new Error(
       `File metadata for virtual path ${JSON.stringify(virtualPath)} does not contain a valid size.`,
     );
@@ -932,14 +949,13 @@ function compactPCloudEntry(
     path:
       virtualPath ??
       (typeof entry.path === "string" ? entry.path : undefined),
-    folderId:
-      isFolder && entry.folderid !== undefined
-        ? String(entry.folderid)
-        : undefined,
-    fileId:
-      !isFolder && entry.fileid !== undefined ? String(entry.fileid) : undefined,
-    size:
-      !isFolder && typeof entry.size === "number" ? entry.size : undefined,
+    folderId: isFolder
+      ? optionalPCloudId(entry.folderid, entry.id, "d")
+      : undefined,
+    fileId: !isFolder
+      ? optionalPCloudId(entry.fileid, entry.id, "f")
+      : undefined,
+    size: !isFolder ? optionalPCloudSize(entry.size) : undefined,
     modified:
       typeof entry.modified === "string" ? entry.modified : undefined,
     contentType:
@@ -959,6 +975,7 @@ function createServer(env: Env) {
     "hello",
     {
       description: "Verify that the pCloud MCP Worker is running and reachable.",
+      annotations: LOCAL_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         name: z.string().optional().describe("Optional name to include in the response."),
       },
@@ -980,6 +997,7 @@ function createServer(env: Env) {
     {
       description:
         "List files and folders inside the configured pCloud virtual root. The visible path / maps to PCLOUD_ROOT_PATH when configured. This tool is read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         folderId: z
           .string()
@@ -1055,8 +1073,7 @@ function createServer(env: Env) {
                   ? folder.name
                   : undefined,
             path: folderPath,
-            folderId:
-              folder.folderid !== undefined ? String(folder.folderid) : undefined,
+            folderId: optionalPCloudId(folder.folderid, folder.id, "d"),
           },
           entries,
           totalEntries: contents.length,
@@ -1094,6 +1111,7 @@ function createServer(env: Env) {
     {
       description:
         "Search file and folder names/paths under the configured pCloud virtual root. This is metadata search only, not full-text file-content search. Matching is case-insensitive and read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         query: z
           .string()
@@ -1221,6 +1239,7 @@ function createServer(env: Env) {
     {
       description:
         "Get normalized metadata for a file after its exact virtual path is known. The path stays inside the configured pCloud virtual root, and this tool is read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         path: z
           .string()
@@ -1269,6 +1288,7 @@ function createServer(env: Env) {
     {
       description:
         "Return a PNG or JPEG file directly as MCP ImageContent after validating its exact virtual path, file metadata, binary signature, and 5 MiB source-file limit. This tool is read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         path: z
           .string()
@@ -1362,6 +1382,7 @@ function createServer(env: Env) {
     {
       description:
         "Read UTF-8 content from a supported text file after its exact virtual path is known. Binary files are rejected. The default file-size limit is 256 KiB and the hard maximum is 1 MiB. This tool is read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         path: z
           .string()
@@ -1458,6 +1479,7 @@ function createServer(env: Env) {
     {
       description:
         "Return a DOCX, XLSX, or PPTX file as an MCP embedded binary resource after validating its exact virtual path, Office metadata, ZIP signature, and 1 MiB source-file limit. This tool is read-only.",
+      annotations: PCLOUD_READ_ONLY_TOOL_ANNOTATIONS,
       inputSchema: {
         path: z
           .string()
@@ -1554,61 +1576,6 @@ function createServer(env: Env) {
   );
 
   return server;
-}
-
-const jwksCache = new Map<
-  string,
-  ReturnType<typeof createRemoteJWKSet>
->();
-
-function normalizeTeamDomain(value: string): string {
-  const raw = value.trim();
-  const url = new URL(raw.startsWith("http://") || raw.startsWith("https://") ? raw : `https://${raw}`);
-  return url.origin;
-}
-
-function getJwks(teamDomain: string) {
-  let jwks = jwksCache.get(teamDomain);
-  if (!jwks) {
-    jwks = createRemoteJWKSet(
-      new URL(`${teamDomain}/cdn-cgi/access/certs`),
-    );
-    jwksCache.set(teamDomain, jwks);
-  }
-  return jwks;
-}
-
-async function verifyCloudflareAccess(
-  request: Request,
-  env: Env,
-): Promise<boolean> {
-  if (!env.TEAM_DOMAIN || !env.POLICY_AUD) {
-    console.error(
-      `Cloudflare Access validation is not configured. TEAM_DOMAIN=${Boolean(env.TEAM_DOMAIN)} POLICY_AUD=${Boolean(env.POLICY_AUD)}`,
-    );
-    return false;
-  }
-
-  const token = request.headers.get("Cf-Access-Jwt-Assertion");
-  if (!token) {
-    console.warn("Cloudflare Access JWT header is missing.");
-    return false;
-  }
-
-  try {
-    const teamDomain = normalizeTeamDomain(env.TEAM_DOMAIN);
-    await jwtVerify(token, getJwks(teamDomain), {
-      issuer: teamDomain,
-      audience: env.POLICY_AUD,
-    });
-    return true;
-  } catch (error) {
-    console.warn(
-      "Cloudflare Access JWT verification failed:",
-      error instanceof Error ? error.message : "unknown error",
-    );
-    return false;
-  }
 }
 
 export default {

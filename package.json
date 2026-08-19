@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "node --experimental-strip-types --test test/security.test.ts test/worker-regression.test.mjs",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"
   },
