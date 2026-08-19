@@ -71,11 +71,11 @@ Read-only access prevents the MCP from modifying pCloud files, but it does not p
 
 ## Search behavior
 
-`search_files` currently performs metadata search only. It uses pCloud recursive folder listing, walks the returned tree in the Worker, and performs case-insensitive substring matching against names and reconstructed virtual paths.
+`search_files` currently performs metadata search only. It requests one non-recursive pCloud folder listing at a time and walks folders iteratively in the Worker, performing case-insensitive substring matching against names and reconstructed virtual paths. Response-derived folder names are validated before they are joined to the already-scoped physical and virtual parent paths; caller-supplied or response-derived folder IDs are not used for traversal.
 
 It does **not** search inside file contents.
 
-The recursive response is limited to 4 MiB, and the iterative Worker-side traversal is limited to 10,000 metadata entries and 64 nesting levels. If a safety limit is reached, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal.
+Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, and 1,024 folder/API calls. If a safety limit is reached, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Because every folder requires an outbound pCloud request, large trees may also require a Cloudflare plan whose per-request subrequest allowance is above the Free plan limit.
 
 ## File metadata, text reading, image content, and Office content
 

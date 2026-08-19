@@ -156,9 +156,9 @@ Search file/folder metadata under a virtual path. The initial implementation is 
 - optional folder matches
 - bounded returned result count
 
-pCloud's documented API does not expose a dedicated general filename search method. The initial implementation therefore uses `listfolder` with recursive listing and searches the returned metadata tree in the Worker.
+pCloud's documented API does not expose a dedicated general filename search method. The implementation therefore calls `listfolder` without recursive mode for one folder at a time and traverses the tree iteratively in the Worker. Traversal is path-based: response-derived folder names are validated and joined beneath the already-resolved physical and virtual parent paths. Response-derived or caller-supplied folder IDs are not used, so traversal cannot bypass the configured virtual root through an ID.
 
-pCloud JSON responses are read through a 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing. This keeps the buffered wire representation small relative to the Worker's 128 MB memory limit and leaves room for the expanded JavaScript metadata tree. The smaller `getfilelink` response has a separate 64 KiB limit. `search_files` traverses iteratively, scans at most 10,000 entries, and descends at most 64 levels. Exceeding any response or traversal bound returns an explicit error without partial search results.
+Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, and performs at most 1,024 folder/API calls. The call limit accommodates moderately large trees while remaining well below the Workers Paid subrequest ceiling; Cloudflare Free has a lower platform subrequest limit and therefore supports only smaller trees. Exceeding any response or traversal bound returns an explicit error without partial search results. Malformed JSON and JSON size overflow are reported separately without exposing response content.
 
 This is **not** full-text content search.
 
@@ -216,7 +216,7 @@ Implementation must account for pCloud's API/OAuth behavior, including regional 
 
 The pCloud root folder has folder ID `0`, but scoped deployments intentionally avoid treating that physical root as the MCP root.
 
-pCloud supports recursive `listfolder`; recursive results contain nested folder `contents`. Recursive metadata may omit full paths, so the MCP reconstructs virtual paths from folder names while walking the tree.
+`search_files` deliberately avoids pCloud recursive `listfolder` responses. It reconstructs paths from validated names while requesting each folder non-recursively, keeping every JSON response independently bounded and reapplying the scoped parent path at each step.
 
 pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
@@ -357,7 +357,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
-- make recursive search iterative and bounded, and require exact text metadata/body size consistency
+- make folder-by-folder metadata search iterative and bounded, and require exact text metadata/body size consistency
 - disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
 - retain the existing embedded Office resource transport without adding standalone resource APIs
 

@@ -61,6 +61,7 @@ const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const PCLOUD_GETFILELINK_JSON_MAX_BYTES = 64 * 1024;
 const SEARCH_MAX_SCANNED_ENTRIES = 10_000;
 const SEARCH_MAX_DEPTH = 64;
+const SEARCH_MAX_FOLDER_API_CALLS = 1_024;
 const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
 const LOCAL_READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -425,6 +426,7 @@ async function getPCloudFileContentUrl(
     response,
     PCLOUD_GETFILELINK_JSON_MAX_BYTES,
     "pCloud getfilelink returned an invalid response.",
+    `pCloud getfilelink JSON response exceeded the ${PCLOUD_GETFILELINK_JSON_MAX_BYTES}-byte safety limit.`,
   );
 
   if (!isRecord(rawData)) {
@@ -481,6 +483,7 @@ async function callPCloudJson(
     response,
     PCLOUD_JSON_MAX_BYTES,
     "pCloud returned an invalid JSON response.",
+    `pCloud JSON response exceeded the ${PCLOUD_JSON_MAX_BYTES}-byte safety limit.`,
   );
   if (!isRecord(rawData)) {
     throw new Error("pCloud returned an invalid JSON response.");
@@ -874,16 +877,51 @@ async function readResponseBytesWithinLimit(
   return bytes;
 }
 
+function getSearchFolderContents(
+  metadata: Record<string, unknown> | undefined,
+): Array<Record<string, unknown>> {
+  if (!metadata || !Array.isArray(metadata.contents)) {
+    throw new Error("pCloud listfolder returned invalid folder metadata.");
+  }
+
+  if (!metadata.contents.every(isRecord)) {
+    throw new Error("pCloud listfolder returned invalid folder metadata.");
+  }
+
+  return metadata.contents;
+}
+
+function getSearchEntryName(entry: Record<string, unknown>): string {
+  const name = entry.name;
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name === "." ||
+    name === ".." ||
+    name.includes("/") ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw new Error("pCloud listfolder returned an invalid entry name.");
+  }
+
+  return name;
+}
+
 async function parseBoundedPCloudJson(
   response: Response,
   maxBytes: number,
   errorMessage: string,
+  limitErrorMessage: string,
 ): Promise<unknown> {
   try {
     const bytes = await readResponseBytesWithinLimit(response, maxBytes);
     const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     return JSON.parse(text) as unknown;
-  } catch {
+  } catch (error) {
+    if (error instanceof PCloudContentLimitError) {
+      throw new Error(limitErrorMessage);
+    }
+
     throw new Error(errorMessage);
   }
 }
@@ -1156,87 +1194,86 @@ function createServer(env: Env) {
         }
 
         const resolved = resolveVirtualPath(env, path);
-        const data = await callPCloudJson(env, "listfolder", {
-          path: resolved.physicalPath,
-          recursive: "1",
-        });
-
-        const rootMetadata = data.metadata ?? {};
         const lowerNeedle = needle.toLocaleLowerCase();
         const returnFolders = includeFolders ?? true;
         const limit = maxResults ?? 50;
         const matches: ReturnType<typeof compactPCloudEntry>[] = [];
         let scannedEntries = 0;
         let totalMatches = 0;
+        let folderApiCalls = 0;
 
-        type SearchFrame = {
-          entries: Array<Record<string, unknown>>;
-          index: number;
-          parentVirtualPath: string;
+        type SearchFolder = {
+          virtualPath: string;
+          physicalPath: string;
           depth: number;
         };
-        const stack: SearchFrame[] = [
+        const pendingFolders: SearchFolder[] = [
           {
-            entries: getMetadataContents(rootMetadata),
-            index: 0,
-            parentVirtualPath: resolved.virtualPath,
-            depth: 1,
+            virtualPath: resolved.virtualPath,
+            physicalPath: resolved.physicalPath,
+            depth: 0,
           },
         ];
+        let nextFolderIndex = 0;
 
-        while (stack.length > 0) {
-          const frame = stack[stack.length - 1];
-          if (frame.index >= frame.entries.length) {
-            stack.pop();
-            continue;
-          }
-
-          const entry = frame.entries[frame.index];
-          frame.index += 1;
-          scannedEntries += 1;
-          if (scannedEntries > SEARCH_MAX_SCANNED_ENTRIES) {
+        while (nextFolderIndex < pendingFolders.length) {
+          if (folderApiCalls >= SEARCH_MAX_FOLDER_API_CALLS) {
             throw new Error(
-              `Search exceeded the ${SEARCH_MAX_SCANNED_ENTRIES}-entry safety limit; no complete search result was returned.`,
+              `Search exceeded the ${SEARCH_MAX_FOLDER_API_CALLS}-folder/API-call safety limit; no complete search result was returned.`,
             );
           }
 
-          const name = typeof entry.name === "string" ? entry.name : "";
-          if (!name) {
-            continue;
-          }
+          const folder = pendingFolders[nextFolderIndex];
+          nextFolderIndex += 1;
+          folderApiCalls += 1;
+          const data = await callPCloudJson(env, "listfolder", {
+            path: folder.physicalPath,
+          });
+          const entries = getSearchFolderContents(data.metadata);
 
-          const virtualPath = joinVirtualPath(
-            frame.parentVirtualPath,
-            name,
-          );
-          const relativePath = relativeSearchPath(
-            resolved.virtualPath,
-            virtualPath,
-          );
-          const isFolder = entry.isfolder === true;
-          const searchable = `${name}\n${relativePath}`.toLocaleLowerCase();
-          const matchesQuery = searchable.includes(lowerNeedle);
-
-          if (matchesQuery && (returnFolders || !isFolder)) {
-            totalMatches += 1;
-            if (matches.length < limit) {
-              matches.push(compactPCloudEntry(entry, virtualPath));
+          for (const entry of entries) {
+            scannedEntries += 1;
+            if (scannedEntries > SEARCH_MAX_SCANNED_ENTRIES) {
+              throw new Error(
+                `Search exceeded the ${SEARCH_MAX_SCANNED_ENTRIES}-entry safety limit; no complete search result was returned.`,
+              );
             }
-          }
 
-          if (isFolder) {
-            const children = getMetadataContents(entry);
-            if (children.length > 0) {
-              if (frame.depth >= SEARCH_MAX_DEPTH) {
-                throw new Error(
-                  `Search exceeded the ${SEARCH_MAX_DEPTH}-level nesting safety limit; no complete search result was returned.`,
-                );
+            const entryDepth = folder.depth + 1;
+            if (entryDepth > SEARCH_MAX_DEPTH) {
+              throw new Error(
+                `Search exceeded the ${SEARCH_MAX_DEPTH}-level nesting safety limit; no complete search result was returned.`,
+              );
+            }
+
+            const name = getSearchEntryName(entry);
+            if (typeof entry.isfolder !== "boolean") {
+              throw new Error(
+                "pCloud listfolder returned invalid entry metadata.",
+              );
+            }
+
+            const virtualPath = joinVirtualPath(folder.virtualPath, name);
+            const relativePath = relativeSearchPath(
+              resolved.virtualPath,
+              virtualPath,
+            );
+            const isFolder = entry.isfolder;
+            const searchable = `${name}\n${relativePath}`.toLocaleLowerCase();
+            const matchesQuery = searchable.includes(lowerNeedle);
+
+            if (matchesQuery && (returnFolders || !isFolder)) {
+              totalMatches += 1;
+              if (matches.length < limit) {
+                matches.push(compactPCloudEntry(entry, virtualPath));
               }
-              stack.push({
-                entries: children,
-                index: 0,
-                parentVirtualPath: virtualPath,
-                depth: frame.depth + 1,
+            }
+
+            if (isFolder) {
+              pendingFolders.push({
+                virtualPath,
+                physicalPath: joinVirtualPath(folder.physicalPath, name),
+                depth: entryDepth,
               });
             }
           }
@@ -1248,12 +1285,14 @@ function createServer(env: Env) {
           includeFolders: returnFolders,
           matches,
           scannedEntries,
+          folderApiCalls,
           totalMatches,
           returnedMatches: matches.length,
           truncated: totalMatches > matches.length,
           safetyLimits: {
             maxScannedEntries: SEARCH_MAX_SCANNED_ENTRIES,
             maxDepth: SEARCH_MAX_DEPTH,
+            maxFolderApiCalls: SEARCH_MAX_FOLDER_API_CALLS,
           },
           searchType: "metadata-name-and-path-substring",
         };

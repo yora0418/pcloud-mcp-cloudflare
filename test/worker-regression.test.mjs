@@ -15,6 +15,7 @@ const CONTENT_HOST = "content.pcloud.com";
 const CONTENT_PATH = "/temporary/mock-content";
 const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
+const SEARCH_MAX_FOLDER_API_CALLS = 1_024;
 
 let worker;
 let bundleDirectory;
@@ -67,6 +68,7 @@ function setScenario({
   metadata,
   bytes = new TextEncoder().encode("hello"),
   listMetadata,
+  listMetadataByPath,
   contentLength,
   streamingChunks,
   keepOpenOnExhaustion = false,
@@ -88,6 +90,7 @@ function setScenario({
       },
     bytes,
     listMetadata,
+    listMetadataByPath,
     contentLength:
       contentLength === undefined ? String(bytes.byteLength) : contentLength,
     streamingChunks,
@@ -227,11 +230,18 @@ before(async () => {
       assert.equal(request.method, "GET");
       assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
-      assert.equal(url.searchParams.get("path"), ROOT_PATH);
+      const requestedPath = url.searchParams.get("path");
+      assert.ok(
+        requestedPath === ROOT_PATH || requestedPath?.startsWith(`${ROOT_PATH}/`),
+      );
+      assert.equal(url.searchParams.get("recursive"), null);
       if (scenario.listResponseFactory) {
-        return scenario.listResponseFactory();
+        return scenario.listResponseFactory({ request, requestedPath, url });
       }
-      return jsonResponse({ result: 0, metadata: scenario.listMetadata });
+      const metadata =
+        scenario.listMetadataByPath?.[requestedPath] ??
+        (requestedPath === ROOT_PATH ? scenario.listMetadata : undefined);
+      return jsonResponse({ result: 0, metadata });
     }
 
     if (
@@ -674,7 +684,10 @@ test("pCloud JSON responses are bounded by declared and streamed byte counts", a
   });
   let result = await callTool("get_file_info", { path: scenario.virtualPath });
   assert.equal(result.isError, true);
-  assert.equal(result.content[0].text, "pCloud returned an invalid JSON response.");
+  assert.equal(
+    result.content[0].text,
+    `pCloud JSON response exceeded the ${PCLOUD_JSON_MAX_BYTES}-byte safety limit.`,
+  );
   assert.equal(pCloudApiCancelCount, 1);
 
   setScenario({
@@ -692,7 +705,10 @@ test("pCloud JSON responses are bounded by declared and streamed byte counts", a
   });
   result = await callTool("get_file_info", { path: scenario.virtualPath });
   assert.equal(result.isError, true);
-  assert.equal(result.content[0].text, "pCloud returned an invalid JSON response.");
+  assert.equal(
+    result.content[0].text,
+    `pCloud JSON response exceeded the ${PCLOUD_JSON_MAX_BYTES}-byte safety limit.`,
+  );
   assert.equal(pCloudApiCancelCount, 1);
 
   setScenario({
@@ -729,39 +745,93 @@ test("getfilelink JSON uses its own bounded response limit", async () => {
   assert.equal(result.isError, true);
   assert.equal(
     result.content[0].text,
-    "pCloud getfilelink returned an invalid response.",
+    "pCloud getfilelink JSON response exceeded the 65536-byte safety limit.",
   );
   assert.equal(pCloudApiCancelCount, 1);
   assert.equal(pCloudCallCount(CONTENT_PATH), 0);
 });
 
-test("iterative search reports complete results or explicit safety-limit errors", async () => {
+test("search uses non-recursive folder listings and completes traversal after maxResults", async () => {
   setScenario({
-    listMetadata: {
-      isfolder: true,
-      contents: [
-        {
-          isfolder: true,
-          name: "Folder",
-          contents: [
-            { isfolder: false, name: "match.txt", size: 1 },
-          ],
-        },
-        { isfolder: false, name: "other.txt", size: 1 },
-      ],
+    listMetadataByPath: {
+      [ROOT_PATH]: {
+        isfolder: true,
+        contents: [
+          {
+            isfolder: true,
+            name: "Folder",
+            folderid: Number.MAX_SAFE_INTEGER + 1,
+          },
+          { isfolder: false, name: "root-match.txt", size: 1 },
+          { isfolder: false, name: "other.txt", size: 1 },
+        ],
+      },
+      [`${ROOT_PATH}/Folder`]: {
+        isfolder: true,
+        contents: [
+          { isfolder: false, name: "nested-match.txt", size: 1 },
+          { isfolder: false, name: "third-match.txt", size: 1 },
+        ],
+      },
     },
   });
-  let result = parseToolText(
-    await callTool("search_files", { query: "match", path: "/" }),
+
+  const result = parseToolText(
+    await callTool("search_files", {
+      query: "match",
+      path: "/",
+      maxResults: 1,
+      includeFolders: true,
+    }),
   );
-  assert.equal(result.scannedEntries, 3);
-  assert.equal(result.totalMatches, 1);
-  assert.equal(result.matches[0].path, "/Folder/match.txt");
+  assert.equal(result.scannedEntries, 5);
+  assert.equal(result.folderApiCalls, 2);
+  assert.equal(result.totalMatches, 3);
+  assert.equal(result.returnedMatches, 1);
+  assert.equal(result.truncated, true);
+  assert.equal(result.matches[0].path, "/root-match.txt");
   assert.deepEqual(result.safetyLimits, {
     maxScannedEntries: 10_000,
     maxDepth: 64,
+    maxFolderApiCalls: SEARCH_MAX_FOLDER_API_CALLS,
   });
+  assert.equal(
+    fetchCalls
+      .filter(({ url }) => url.pathname === "/listfolder")
+      .some(({ url }) => url.searchParams.has("recursive")),
+    false,
+  );
+  assert.equal(
+    fetchCalls
+      .filter(({ url }) => url.pathname === "/listfolder")
+      .some(({ url }) => url.searchParams.has("folderid")),
+    false,
+  );
 
+  const nestedResult = parseToolText(
+    await callTool("search_files", {
+      query: "nested",
+      path: "/",
+      includeFolders: false,
+    }),
+  );
+  assert.equal(nestedResult.matches[0].path, "/Folder/nested-match.txt");
+
+  const scopedSearchResult = parseToolText(
+    await callTool("search_files", {
+      query: "nested",
+      path: "/Folder",
+      includeFolders: false,
+    }),
+  );
+  assert.equal(scopedSearchResult.searchPath, "/Folder");
+  assert.equal(
+    scopedSearchResult.matches[0].path,
+    "/Folder/nested-match.txt",
+  );
+});
+
+test("search rejects scanned-entry and depth overflow without partial results", async () => {
   setScenario({
     listMetadata: {
       isfolder: true,
@@ -780,24 +850,118 @@ test("iterative search reports complete results or explicit safety-limit errors"
   assert.match(errorResult.content[0].text, /10000-entry safety limit/);
   assert.match(errorResult.content[0].text, /no complete search result/);
 
-  let nested = { isfolder: false, name: "leaf.txt", size: 1 };
-  for (let depth = 65; depth >= 1; depth -= 1) {
-    nested = {
+  const listMetadataByPath = {};
+  let parentPath = ROOT_PATH;
+  for (let depth = 1; depth <= 65; depth += 1) {
+    const name = `level-${depth}`;
+    listMetadataByPath[parentPath] = {
       isfolder: true,
-      name: `level-${depth}`,
-      contents: [nested],
+      contents: [{ isfolder: true, name }],
     };
+    parentPath = `${parentPath}/${name}`;
   }
-  setScenario({
-    listMetadata: { isfolder: true, contents: [nested] },
-  });
+  setScenario({ listMetadataByPath });
   errorResult = await callTool("search_files", {
-    query: "leaf",
+    query: "level",
     path: "/",
   });
   assert.equal(errorResult.isError, true);
   assert.match(errorResult.content[0].text, /64-level nesting safety limit/);
   assert.match(errorResult.content[0].text, /no complete search result/);
+  assert.equal(pCloudCallCount("/listfolder"), 65);
+});
+
+test("search enforces its folder API-call limit", async () => {
+  setScenario({
+    listResponseFactory: ({ requestedPath }) =>
+      jsonResponse({
+        result: 0,
+        metadata: {
+          isfolder: true,
+          contents:
+            requestedPath === ROOT_PATH
+              ? Array.from(
+                  { length: SEARCH_MAX_FOLDER_API_CALLS },
+                  (_, index) => ({
+                    isfolder: true,
+                    name: `folder-${index}`,
+                  }),
+                )
+              : [],
+        },
+      }),
+  });
+  const result = await callTool("search_files", {
+    query: "absent",
+    path: "/",
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /1024-folder\/API-call safety limit/);
+  assert.match(result.content[0].text, /no complete search result/);
+  assert.equal(pCloudCallCount("/listfolder"), SEARCH_MAX_FOLDER_API_CALLS);
+});
+
+test("search distinguishes a folder JSON overflow and propagates traversal API errors", async () => {
+  setScenario({
+    listResponseFactory: () =>
+      streamingResponse([], {
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(PCLOUD_JSON_MAX_BYTES + 1),
+        },
+        onCancel() {
+          pCloudApiCancelCount += 1;
+        },
+        keepOpenOnExhaustion: true,
+      }),
+  });
+  let result = await callTool("search_files", { query: "a", path: "/" });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    `pCloud JSON response exceeded the ${PCLOUD_JSON_MAX_BYTES}-byte safety limit.`,
+  );
+  assert.equal(pCloudApiCancelCount, 1);
+
+  setScenario({
+    listResponseFactory: ({ requestedPath }) =>
+      requestedPath === ROOT_PATH
+        ? jsonResponse({
+            result: 0,
+            metadata: {
+              isfolder: true,
+              contents: [{ isfolder: true, name: "Folder" }],
+            },
+          })
+        : jsonResponse({ result: 2000 }),
+  });
+  result = await callTool("search_files", { query: "folder", path: "/" });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud API request failed with result code 2000.",
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 2);
+});
+
+test("search refuses response-derived paths that could escape the virtual root", async () => {
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [{ isfolder: true, name: ".." }],
+    },
+  });
+  const result = await callTool("search_files", {
+    query: "outside",
+    path: "/",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud listfolder returned an invalid entry name.",
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+  assert.ok(!JSON.stringify(result).includes(ROOT_PATH));
 });
 
 test("virtual-root text retrieval and pre-download byte limits remain enforced", async () => {
