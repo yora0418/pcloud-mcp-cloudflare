@@ -324,6 +324,15 @@ Rationale under consideration: if modified versions are offered to other users a
 - validate native Office handling for all three supported formats through a deployed Worker and ChatGPT MCP, including document structure and text, slide text/tables/values/layout, and workbook cells/formulas/results/cross-sheet references/charts
 - treat direct-upload parity as unmeasured rather than claiming equivalence
 
+### Phase 8 — v0.1 public release readiness — in progress
+
+#### Phase 8.1 — security hardening — complete
+
+- preserve exact pCloud 64-bit metadata without exposing rounded unsafe numeric identifiers or sizes
+- restrict the Cloudflare Access trust anchor to canonical HTTPS team domains and RS256 JWT verification
+- declare read-only MCP tool annotations and add tracked security and regression tests
+- validate the hardened Access authentication and existing pCloud metadata/content paths through a production Worker and ChatGPT MCP
+
 ### Later
 
 - indexing/caching only if real usage shows it is needed
