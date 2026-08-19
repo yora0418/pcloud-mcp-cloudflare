@@ -2,7 +2,9 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** Functional private prototype. Authenticated ChatGPT connectivity, pCloud OAuth, folder listing, scoped virtual roots, metadata search, file metadata, bounded text reading, bounded image retrieval, and bounded Office content retrieval are implemented. The repository is still private while the initial feature set and security review are completed.
+> **Status:** v0.1 release candidate; publication pending. The core read-only tools and production integrations through Phase 8.1 are validated. The repository remains private pending final external review and release steps.
+
+For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
 ## Goals
 
@@ -106,7 +108,9 @@ All registered tools declare MCP read-only, non-destructive, and idempotent anno
 
 ## License
 
-License is not finalized yet. AGPL-3.0 is currently the leading candidate.
+Licensed under the [AGPL-3.0-only](LICENSE) license.
+
+Bug reports and contributions are welcome. Opening a GitHub Issue with clear details and reproduction steps is already a valuable contribution. Report potential security vulnerabilities privately as described in [SECURITY.md](SECURITY.md), without including credentials or sensitive details in a public Issue.
 
 ## Project
 

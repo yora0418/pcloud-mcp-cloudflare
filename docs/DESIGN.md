@@ -24,7 +24,7 @@ Cloudflare Worker
 pCloud
 ```
 
-The public repository contains the software. Each user deploys their own Worker instance and supplies their own credentials and Access configuration.
+The source repository is prepared for public distribution. Each user deploys their own Worker instance and supplies their own credentials and Access configuration.
 
 ## Initial security boundary
 
@@ -126,7 +126,7 @@ Rules:
 - virtual paths must be absolute and cannot contain empty, `.` or `..` segments
 - when `PCLOUD_ROOT_PATH` is a subfolder, direct `folderId` access is disabled in `list_folder` so an ID cannot bypass the scoped root
 - tool responses expose virtual paths rather than the physical root prefix
-- future tools such as `get_file_info` and `read_file` must use the same path-resolution boundary
+- all current and future path-based tools use the same path-resolution boundary
 
 If `PCLOUD_ROOT_PATH` is unset, `/` means the real pCloud root for backward compatibility and general self-hosted use.
 
@@ -248,17 +248,22 @@ User's pCloud account
 
 YoraLAB provides the software; YoraLAB does not host users' personal pCloud access in the initial model.
 
-The developer's own production instance likewise runs in the developer's personal Cloudflare account rather than the YoraLAB public-service account.
-
 ## Repository visibility
 
-Development begins in a private repository. The repository is intended to become public once the initial implementation is functional and reviewed for accidental credential or personal-data exposure.
+The repository remains private while the v0.1 release candidate undergoes final external review. Publication, tagging, and the first GitHub Release are separate release steps.
 
 ## License
 
-AGPL-3.0 is the current leading candidate, but the license has not been finalized yet.
+The project is licensed under `AGPL-3.0-only`. The complete license text is in the repository root `LICENSE` file.
 
-Rationale under consideration: if modified versions are offered to other users as a network service, improvements should ideally remain available as source code. Final license selection should be made before public release.
+## v0.1 release packaging
+
+- application and MCP server version: `0.1.0`
+- distribution: GitHub source repository and GitHub-generated source archives
+- npm publication: disabled through `"private": true`
+- reproducibility: npm dependencies are recorded in the tracked `package-lock.json`
+- validation: credential-free GitHub Actions runs the mocked tests, TypeScript check, and Wrangler deployment dry run
+- publication status: repository visibility, Git tag, and GitHub Release remain pending separate final release steps
 
 ## Development phases
 
@@ -281,9 +286,9 @@ Rationale under consideration: if modified versions are offered to other users a
 - validate `Cf-Access-Jwt-Assertion` inside the Worker
 - verify authenticated access with MCP Inspector and ChatGPT
 
-### Phase 2 — pCloud OAuth — complete for developer instance
+### Phase 2 — pCloud OAuth — complete
 
-- configure the developer's pCloud application credentials
+- configure pCloud application credentials for a self-hosted deployment
 - complete OAuth
 - store the pCloud access token as a Cloudflare secret
 - configure the regional pCloud API host
@@ -332,6 +337,14 @@ Rationale under consideration: if modified versions are offered to other users a
 - restrict the Cloudflare Access trust anchor to canonical HTTPS team domains and RS256 JWT verification
 - declare read-only MCP tool annotations and add tracked security and regression tests
 - validate the hardened Access authentication and existing pCloud metadata/content paths through a production Worker and ChatGPT MCP
+
+#### Phase 8.2 — release packaging and documentation — complete
+
+- set the release-candidate identity to version `0.1.0` under `AGPL-3.0-only`
+- track the npm lockfile for reproducible clean installs without publishing an npm package
+- document third-party self-hosting, security reporting, and release boundaries
+- add credential-free CI for tests, type checking, and a Wrangler deployment dry run
+- keep repository publication, tags, and GitHub Releases pending final external review
 
 ### Later
 
