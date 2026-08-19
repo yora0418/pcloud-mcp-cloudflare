@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeTeamDomain } from "../src/access.ts";
 import {
+  checkMcpRateLimit,
+  dispatchBoundedMcpRequest,
+  MCP_REQUEST_MAX_BYTES,
+  McpRequestBodyError,
+} from "../src/mcp-request-guards.ts";
+import { normalizePCloudApiHost } from "../src/pcloud-config.ts";
+import {
   optionalPCloudId,
   optionalPCloudSize,
   safePCloudSizeNumber,
@@ -77,4 +84,141 @@ test("pCloud sizes keep exact strings without weakening numeric safety", () => {
   assert.equal(safePCloudSizeNumber(Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
   assert.equal(safePCloudSizeNumber("9007199254740993"), undefined);
   assert.equal(safePCloudSizeNumber(Number.MAX_SAFE_INTEGER + 1), undefined);
+});
+
+test("PCLOUD_API_HOST accepts only canonical regional API hosts", () => {
+  assert.equal(normalizePCloudApiHost("api.pcloud.com"), "api.pcloud.com");
+  assert.equal(
+    normalizePCloudApiHost(" HTTPS://EAPI.PCLOUD.COM/ "),
+    "eapi.pcloud.com",
+  );
+
+  for (const value of [
+    "http://api.pcloud.com",
+    "https://user@api.pcloud.com",
+    "https://api.pcloud.com:8443",
+    "https://api.pcloud.com/stat",
+    "https://api.pcloud.com?method=stat",
+    "https://api.pcloud.com#fragment",
+    "https://api.pcloud.com//",
+    "https://api.pcloud.com.example",
+  ]) {
+    assert.throws(() => normalizePCloudApiHost(value), /PCLOUD_API_HOST/);
+  }
+});
+
+test("MCP ingress accepts bounded bodies and reconstructs the request", async () => {
+  for (const length of [16, MCP_REQUEST_MAX_BYTES]) {
+    const body = new Uint8Array(length);
+    let dispatchCount = 0;
+    const receivedLength = await dispatchBoundedMcpRequest(
+      new Request("https://worker.example/mcp", {
+        method: "POST",
+        body,
+      }),
+      async (request) => {
+        dispatchCount += 1;
+        return (await request.arrayBuffer()).byteLength;
+      },
+    );
+    assert.equal(dispatchCount, 1);
+    assert.equal(receivedLength, length);
+  }
+});
+
+test("MCP ingress rejects declared oversized or malformed lengths before dispatch", async () => {
+  for (const contentLength of [
+    String(MCP_REQUEST_MAX_BYTES + 1),
+    "01",
+    "-1",
+    "1.5",
+    String(Number.MAX_SAFE_INTEGER + 1),
+  ]) {
+    let dispatchCount = 0;
+    const request = new Request("https://worker.example/mcp", {
+      method: "POST",
+      headers: { "content-length": contentLength },
+      body: "{}",
+    });
+
+    await assert.rejects(
+      dispatchBoundedMcpRequest(request, () => {
+        dispatchCount += 1;
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof McpRequestBodyError);
+        assert.equal(
+          error.status,
+          contentLength === String(MCP_REQUEST_MAX_BYTES + 1) ? 413 : 400,
+        );
+        return true;
+      },
+    );
+    assert.equal(dispatchCount, 0);
+  }
+});
+
+test("MCP ingress counts a lengthless stream and cancels on actual overflow", async () => {
+  let cancelCount = 0;
+  let dispatchCount = 0;
+  let chunkIndex = 0;
+  const chunks = [
+    new Uint8Array(MCP_REQUEST_MAX_BYTES),
+    new Uint8Array([1]),
+  ];
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(chunks[chunkIndex]);
+      chunkIndex += 1;
+    },
+    cancel() {
+      cancelCount += 1;
+    },
+  });
+  const request = new Request("https://worker.example/mcp", {
+    method: "POST",
+    body,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+
+  await assert.rejects(
+    dispatchBoundedMcpRequest(request, () => {
+      dispatchCount += 1;
+    }),
+    (error: unknown) =>
+      error instanceof McpRequestBodyError && error.status === 413,
+  );
+  assert.equal(cancelCount, 1);
+  assert.equal(dispatchCount, 0);
+});
+
+test("rate limiting isolates principal keys and fails closed when unavailable", async () => {
+  const counts = new Map<string, number>();
+  const binding = {
+    async limit({ key }: { key: string }) {
+      const count = (counts.get(key) ?? 0) + 1;
+      counts.set(key, count);
+      return { success: count <= 2 };
+    },
+  };
+
+  assert.equal(await checkMcpRateLimit(binding, "sub:one"), "allowed");
+  assert.equal(await checkMcpRateLimit(binding, "sub:one"), "allowed");
+  assert.equal(await checkMcpRateLimit(binding, "sub:one"), "limited");
+  assert.equal(await checkMcpRateLimit(binding, "sub:two"), "allowed");
+  assert.equal(await checkMcpRateLimit(undefined, "sub:one"), "unavailable");
+  assert.equal(
+    await checkMcpRateLimit(
+      { async limit() { throw new Error("unavailable"); } },
+      "sub:one",
+    ),
+    "unavailable",
+  );
+  assert.equal(
+    await checkMcpRateLimit(
+      { async limit() { return {} as { success: boolean }; } },
+      "sub:one",
+    ),
+    "unavailable",
+  );
 });

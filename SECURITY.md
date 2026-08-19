@@ -36,5 +36,7 @@ Never include the replacement credential in a report, log, commit, or screenshot
 - Supported file bytes pass from pCloud through the Cloudflare Worker to the MCP client. The Worker enforces type and size limits but the client ultimately receives the selected content.
 - Files, metadata, and document text stored in pCloud are untrusted input. They may contain misleading instructions or prompt injection intended to influence an AI client. Review sensitive actions and do not treat retrieved content as trusted policy or authorization.
 - Cloudflare Access is the external authorization boundary, and the Worker validates the signed Access JWT as defense in depth. Do not expose an alternate route that bypasses Access.
+- Authenticated `/mcp` POST bodies are limited to 256 KiB before MCP SDK dispatch. A Cloudflare Rate Limiting binding applies 120 requests per 60 seconds per verified Access principal; it is an approximate location-local abuse control, not exact accounting. Missing or failed rate-limit enforcement fails closed.
+- Bearer-authenticated pCloud API requests never follow redirects. Temporary content requests also use HTTPS-only validated pCloud hosts and manual redirect handling.
 
 See the [self-hosting setup guide](docs/SETUP.md) for configuration details.

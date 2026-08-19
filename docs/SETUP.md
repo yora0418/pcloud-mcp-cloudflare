@@ -60,7 +60,7 @@ If you use a custom domain or route instead of the generated Workers hostname, c
 2. Add an Allow policy limited to the identities that should be able to read the exposed pCloud content. Access applications deny unmatched users by default.
 3. Enable **Managed OAuth** so non-browser MCP clients can authenticate through an authorization-code flow. Follow Cloudflare's [Managed OAuth guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/), including redirect-client restrictions appropriate for your MCP client.
 4. Copy the Cloudflare Zero Trust team domain and the application's Audience (AUD) tag. Cloudflare documents where to find the AUD tag in its [JWT validation guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
-5. Protect the entire Worker hostname, including `/mcp`. Include preview deployments in the Access application or disable preview URLs, and do not create an unprotected alternate route to the same Worker.
+5. Protect the entire Worker hostname, including `/mcp`, and do not create an unprotected alternate route to the same Worker. The tracked Wrangler configuration explicitly disables both versioned and aliased Preview URLs while retaining the normal production `workers.dev` endpoint.
 
 The Worker independently validates the `Cf-Access-Jwt-Assertion` signature, issuer, audience, and RS256 algorithm after Cloudflare Access allows the request.
 
@@ -85,6 +85,8 @@ npx.cmd wrangler secret put PCLOUD_ACCESS_TOKEN
 ```
 
 The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables and secrets.
+
+It also defines the non-secret `MCP_RATE_LIMITER` binding with a default of 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Its `namespace_id` is a positive-integer string required by Cloudflare. If namespace `1001` is already used by another rate-limit binding in the same Cloudflare account, select a different unused positive integer before the first deployment; bindings sharing a namespace also share counters for matching keys. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
 
 ## 6. Deploy and verify
 
@@ -118,6 +120,8 @@ For ChatGPT, follow OpenAI's [current custom MCP app instructions](https://help.
 6. Call `list_folder` with path `/` and confirm that it exposes only the intended `PCLOUD_ROOT_PATH` subtree before reading content.
 
 Client-side model behavior and support for image or embedded Office content are client capabilities, not guarantees made by the Worker.
+
+`get_office_content` returns its binary resource inside a tool result. It does not register standalone `resources/list` or `resources/read` APIs, so a general MCP client must support embedded resource content in tool results to consume Office bytes.
 
 ## Updating
 

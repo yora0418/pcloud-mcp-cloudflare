@@ -75,17 +75,25 @@ Read-only access prevents the MCP from modifying pCloud files, but it does not p
 
 It does **not** search inside file contents.
 
+The recursive response is limited to 4 MiB, and the iterative Worker-side traversal is limited to 10,000 metadata entries and 64 nesting levels. If a safety limit is reached, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal.
+
 ## File metadata, text reading, image content, and Office content
 
 `get_file_info` uses an exact virtual path and returns selected file metadata, including available image, audio, or video details. It does not accept a caller-supplied file ID, and it never returns the hidden physical root prefix. pCloud file and folder IDs in metadata responses are returned only as exact decimal strings; an already-imprecise numeric ID is omitted unless pCloud's canonical string `id` can recover it. Safe numeric sizes retain their numeric representation; exact decimal size strings are preserved when supplied by pCloud, while already-imprecise numeric values are omitted.
 
 `read_file` is text-only. It accepts supported text MIME types and a conservative text-extension allowlist when pCloud reports a generic MIME type. Binary and unsupported formats are rejected before their contents are fetched. It retrieves raw file bytes through a temporary pCloud content link and decodes them strictly as UTF-8; non-UTF-8 text is rejected. Support for additional encodings may be added later.
 
-The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received.
+The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received and must exactly match the metadata size.
 
 `get_image_content` is a separate read-only path for PNG and JPEG files. It accepts an exact virtual path and returns the complete image directly as MCP ImageContent after validating metadata, source size, and the downloaded binary signature. The image source-file hard limit is 5 MiB (`5242880` bytes), independent of the smaller inline UTF-8 text limits used by `read_file`.
 
 `get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker checks the supported extension and MIME metadata plus the standard ZIP local-header signature, but does not inspect, decompress, or validate ZIP entries or XML. Office document validity and content interpretation are delegated to the MCP client. PDF, legacy Office formats, macro-enabled extensions, and arbitrary ZIP paths are not supported. ChatGPT MCP integration has confirmed native Office handling for all three supported formats; this validation does not claim quantitative parity with direct file uploads.
+
+Office bytes are carried as an embedded resource inside the tool result; the Worker does not expose standalone `resources/list` or `resources/read` APIs. Other MCP clients must support embedded resource content in tool results to consume this output.
+
+## Request safety limits
+
+Authenticated `/mcp` POST bodies are streamed through a 256 KiB (`262144` byte) gate before they reach the MCP SDK. Requests over the limit receive HTTP 413. The Worker also applies a Cloudflare Rate Limiting binding to authenticated MCP POST requests at 120 requests per 60 seconds per verified Access principal. The binding is a protective, location-local approximate limiter rather than an accounting mechanism; binding absence or failure causes MCP POST requests to fail closed with HTTP 503.
 
 ## Runtime
 

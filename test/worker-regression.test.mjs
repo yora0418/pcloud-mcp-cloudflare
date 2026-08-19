@@ -13,18 +13,53 @@ const ACCESS_TOKEN = "mock-pcloud-access-token";
 const ROOT_PATH = "/Scoped";
 const CONTENT_HOST = "content.pcloud.com";
 const CONTENT_PATH = "/temporary/mock-content";
+const MCP_REQUEST_MAX_BYTES = 256 * 1024;
+const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 
 let worker;
 let bundleDirectory;
 let accessJwt;
+let accessPrivateKey;
+let publicJwk;
 let scenario;
 let fetchCalls = [];
 let contentCancelCount = 0;
+let pCloudApiCancelCount = 0;
+let rateLimitCalls = [];
 
-function jsonResponse(value) {
+function jsonResponse(value, init = {}) {
   return new Response(JSON.stringify(value), {
-    headers: { "content-type": "application/json" },
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...init.headers,
+    },
   });
+}
+
+function streamingResponse(chunks, {
+  headers = {},
+  status = 200,
+  onCancel,
+  keepOpenOnExhaustion = false,
+} = {}) {
+  let chunkIndex = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (chunkIndex >= chunks.length) {
+        if (!keepOpenOnExhaustion) {
+          controller.close();
+        }
+        return;
+      }
+      controller.enqueue(chunks[chunkIndex]);
+      chunkIndex += 1;
+    },
+    cancel() {
+      onCancel?.();
+    },
+  });
+  return new Response(body, { status, headers });
 }
 
 function setScenario({
@@ -35,6 +70,9 @@ function setScenario({
   contentLength,
   streamingChunks,
   keepOpenOnExhaustion = false,
+  statResponseFactory,
+  listResponseFactory,
+  getfilelinkResponseFactory,
 } = {}) {
   scenario = {
     virtualPath,
@@ -54,9 +92,51 @@ function setScenario({
       contentLength === undefined ? String(bytes.byteLength) : contentLength,
     streamingChunks,
     keepOpenOnExhaustion,
+    statResponseFactory,
+    listResponseFactory,
+    getfilelinkResponseFactory,
   };
   fetchCalls = [];
   contentCancelCount = 0;
+  pCloudApiCancelCount = 0;
+  rateLimitCalls = [];
+}
+
+const allowRateLimiter = {
+  async limit({ key }) {
+    rateLimitCalls.push(key);
+    return { success: true };
+  },
+};
+
+async function makeAccessJwt(options = {}) {
+  const sub = Object.hasOwn(options, "sub") ? options.sub : "mock-user";
+  const {
+    commonName,
+    issuer = TEAM_DOMAIN,
+    audience = POLICY_AUD,
+    expiration = "5m",
+    algorithm = "RS256",
+  } = options;
+  const payload = {};
+  if (sub !== undefined) {
+    payload.sub = sub;
+  }
+  if (commonName !== undefined) {
+    payload.common_name = commonName;
+  }
+
+  const jwt = new SignJWT(payload)
+    .setProtectedHeader({ alg: algorithm, kid: publicJwk.kid })
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime(expiration);
+
+  if (algorithm === "HS256") {
+    return jwt.sign(new TextEncoder().encode("not-an-rsa-key"));
+  }
+  return jwt.sign(accessPrivateKey);
 }
 
 function pCloudCallCount(pathname) {
@@ -70,6 +150,21 @@ function parseToolText(result) {
   assert.equal(result.content.length, 1);
   assert.equal(result.content[0].type, "text");
   return JSON.parse(result.content[0].text);
+}
+
+function createRpcBody(method, params, targetLength) {
+  rpcId += 1;
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: rpcId,
+    method,
+    params,
+  });
+  if (targetLength === undefined) {
+    return body;
+  }
+  assert.ok(body.length <= targetLength);
+  return body.padEnd(targetLength, " ");
 }
 
 before(async () => {
@@ -97,15 +192,10 @@ before(async () => {
   assert.equal(typeof worker?.fetch, "function");
 
   const { privateKey, publicKey } = await generateKeyPair("RS256");
-  const publicJwk = await exportJWK(publicKey);
+  accessPrivateKey = privateKey;
+  publicJwk = await exportJWK(publicKey);
   Object.assign(publicJwk, { alg: "RS256", use: "sig", kid: "mock-key" });
-  accessJwt = await new SignJWT({ sub: "mock-user" })
-    .setProtectedHeader({ alg: "RS256", kid: publicJwk.kid })
-    .setIssuer(TEAM_DOMAIN)
-    .setAudience(POLICY_AUD)
-    .setIssuedAt()
-    .setExpirationTime("5m")
-    .sign(privateKey);
+  accessJwt = await makeAccessJwt();
 
   globalThis.fetch = async (input, init = {}) => {
     const request = input instanceof Request ? input : new Request(input, init);
@@ -121,8 +211,12 @@ before(async () => {
 
     if (url.hostname === "api.pcloud.com" && url.pathname === "/stat") {
       assert.equal(request.method, "GET");
+      assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
       assert.equal(url.searchParams.get("path"), `${ROOT_PATH}${scenario.virtualPath}`);
+      if (scenario.statResponseFactory) {
+        return scenario.statResponseFactory();
+      }
       return jsonResponse({ result: 0, metadata: scenario.metadata });
     }
 
@@ -131,8 +225,12 @@ before(async () => {
       url.pathname === "/listfolder"
     ) {
       assert.equal(request.method, "GET");
+      assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
       assert.equal(url.searchParams.get("path"), ROOT_PATH);
+      if (scenario.listResponseFactory) {
+        return scenario.listResponseFactory();
+      }
       return jsonResponse({ result: 0, metadata: scenario.listMetadata });
     }
 
@@ -146,6 +244,9 @@ before(async () => {
       const form = new URLSearchParams(await request.text());
       assert.equal(form.get("path"), `${ROOT_PATH}${scenario.virtualPath}`);
       assert.equal(form.get("access_token"), ACCESS_TOKEN);
+      if (scenario.getfilelinkResponseFactory) {
+        return scenario.getfilelinkResponseFactory();
+      }
       return jsonResponse({ result: 0, hosts: [CONTENT_HOST], path: CONTENT_PATH });
     }
 
@@ -197,6 +298,7 @@ const env = {
   PCLOUD_ACCESS_TOKEN: ACCESS_TOKEN,
   PCLOUD_API_HOST: "api.pcloud.com",
   PCLOUD_ROOT_PATH: ROOT_PATH,
+  MCP_RATE_LIMITER: allowRateLimiter,
 };
 const context = {
   waitUntil() {},
@@ -204,21 +306,38 @@ const context = {
 };
 let rpcId = 0;
 
-async function rpc(method, params, overrides = {}) {
-  rpcId += 1;
-  const response = await worker.fetch(
-    new Request("https://worker.example/mcp", {
-      method: "POST",
-      headers: {
-        Accept: "application/json, text/event-stream",
-        "Content-Type": "application/json",
-        "Cf-Access-Jwt-Assertion": accessJwt,
-        "MCP-Protocol-Version": "2025-11-25",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
-    }),
+async function sendMcpRequest(body, {
+  token = accessJwt,
+  overrides = {},
+  headers = {},
+} = {}) {
+  const requestInit = {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+      "Cf-Access-Jwt-Assertion": token,
+      "MCP-Protocol-Version": "2025-11-25",
+      ...headers,
+    },
+    body,
+  };
+  if (body instanceof ReadableStream) {
+    requestInit.duplex = "half";
+  }
+
+  return worker.fetch(
+    new Request("https://worker.example/mcp", requestInit),
     { ...env, ...overrides },
     context,
+  );
+}
+
+async function rpc(method, params, overrides = {}, token = accessJwt) {
+  rpcId += 1;
+  const response = await sendMcpRequest(
+    JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
+    { overrides, token },
   );
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
@@ -263,6 +382,193 @@ test("valid RS256 Access JWT reaches the Worker and tools declare read-only hint
     assert.equal(tool.annotations.idempotentHint, true);
     assert.equal(tool.annotations.openWorldHint, tool.name !== "hello");
   }
+});
+
+test("Access JWT verification rejects issuer, audience, algorithm, and expiry regressions", async () => {
+  setScenario();
+  const invalidTokens = [
+    await makeAccessJwt({ issuer: "https://other.cloudflareaccess.com" }),
+    await makeAccessJwt({ audience: "wrong-audience" }),
+    await makeAccessJwt({ algorithm: "HS256" }),
+    await makeAccessJwt({ expiration: Math.floor(Date.now() / 1000) - 60 }),
+  ];
+
+  for (const token of invalidTokens) {
+    const response = await sendMcpRequest(
+      createRpcBody("tools/list", {}),
+      { token },
+    );
+    assert.equal(response.status, 403);
+    assert.equal(await response.text(), "Forbidden");
+  }
+  assert.equal(rateLimitCalls.length, 0);
+});
+
+test("verified Access principals use sub, common_name, then a shared fallback", async () => {
+  setScenario();
+  const tokens = [
+    await makeAccessJwt({ sub: "user-one" }),
+    await makeAccessJwt({ sub: undefined, commonName: "service-one" }),
+    await makeAccessJwt({ sub: undefined }),
+  ];
+
+  for (const token of tokens) {
+    const response = await sendMcpRequest(
+      createRpcBody("tools/list", {}),
+      { token },
+    );
+    assert.equal(response.status, 200, await response.text());
+  }
+  assert.deepEqual(rateLimitCalls, [
+    "sub:user-one",
+    "common_name:service-one",
+    "verified:shared",
+  ]);
+});
+
+test("MCP POST rate limiting separates principals and fails closed if unavailable", async () => {
+  setScenario();
+  const counts = new Map();
+  const limiter = {
+    async limit({ key }) {
+      const count = (counts.get(key) ?? 0) + 1;
+      counts.set(key, count);
+      return { success: count <= 2 };
+    },
+  };
+  const firstToken = await makeAccessJwt({ sub: "rate-user-one" });
+  const secondToken = await makeAccessJwt({ sub: "rate-user-two" });
+
+  for (const expectedStatus of [200, 200, 429]) {
+    const response = await sendMcpRequest(
+      createRpcBody("tools/list", {}),
+      { token: firstToken, overrides: { MCP_RATE_LIMITER: limiter } },
+    );
+    assert.equal(response.status, expectedStatus, await response.text());
+  }
+  const separatePrincipal = await sendMcpRequest(
+    createRpcBody("tools/list", {}),
+    { token: secondToken, overrides: { MCP_RATE_LIMITER: limiter } },
+  );
+  assert.equal(separatePrincipal.status, 200, await separatePrincipal.text());
+
+  const throwingLimiter = {
+    async limit() {
+      throw new Error("mock binding failure");
+    },
+  };
+  let response = await sendMcpRequest(createRpcBody("tools/list", {}), {
+    overrides: { MCP_RATE_LIMITER: throwingLimiter },
+  });
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), "Service Unavailable");
+
+  response = await sendMcpRequest(createRpcBody("tools/list", {}), {
+    overrides: { MCP_RATE_LIMITER: undefined },
+  });
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), "Service Unavailable");
+});
+
+test("MCP ingress accepts bounded Content-Length and lengthless requests", async () => {
+  setScenario();
+  let body = createRpcBody("tools/list", {});
+  let response = await sendMcpRequest(body, {
+    headers: { "Content-Length": String(Buffer.byteLength(body)) },
+  });
+  assert.equal(response.status, 200, await response.text());
+
+  body = createRpcBody("tools/list", {}, MCP_REQUEST_MAX_BYTES);
+  response = await sendMcpRequest(body);
+  assert.equal(response.status, 200, await response.text());
+
+  const lengthlessBody = createRpcBody("tools/list", {});
+  let sent = false;
+  const lengthlessStream = new ReadableStream({
+    pull(controller) {
+      if (sent) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new TextEncoder().encode(lengthlessBody));
+      sent = true;
+    },
+  });
+  response = await sendMcpRequest(lengthlessStream);
+  assert.equal(response.status, 200, await response.text());
+});
+
+test("authenticated bodyless GET and HEAD requests bypass POST-only guards", async () => {
+  setScenario();
+  let response = await worker.fetch(
+    new Request("https://worker.example/", {
+      method: "HEAD",
+      headers: { "Cf-Access-Jwt-Assertion": accessJwt },
+    }),
+    { ...env, MCP_RATE_LIMITER: undefined },
+    context,
+  );
+  assert.equal(response.status, 200);
+
+  response = await worker.fetch(
+    new Request("https://worker.example/mcp", {
+      method: "GET",
+      headers: {
+        Accept: "text/event-stream",
+        "Cf-Access-Jwt-Assertion": accessJwt,
+        "MCP-Protocol-Version": "2025-11-25",
+      },
+    }),
+    { ...env, MCP_RATE_LIMITER: undefined },
+    context,
+  );
+  assert.notEqual(response.status, 503);
+  assert.equal(rateLimitCalls.length, 0);
+});
+
+test("MCP ingress rejects malformed, declared oversized, and streamed oversized bodies", async () => {
+  setScenario();
+  let dispatchCancelCount = 0;
+  const declaredBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("{}"));
+    },
+    cancel() {
+      dispatchCancelCount += 1;
+    },
+  });
+  let response = await sendMcpRequest(declaredBody, {
+    headers: { "Content-Length": String(MCP_REQUEST_MAX_BYTES + 1) },
+  });
+  assert.equal(response.status, 413);
+  assert.equal(dispatchCancelCount, 1);
+  assert.match(await response.text(), /262144-byte limit/);
+
+  response = await sendMcpRequest("{}", {
+    headers: { "Content-Length": "01" },
+  });
+  assert.equal(response.status, 400);
+  assert.equal(await response.text(), "Invalid Content-Length header.");
+
+  dispatchCancelCount = 0;
+  let chunkIndex = 0;
+  const chunks = [
+    new Uint8Array(MCP_REQUEST_MAX_BYTES),
+    new Uint8Array([1]),
+  ];
+  const oversizedStream = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(chunks[chunkIndex]);
+      chunkIndex += 1;
+    },
+    cancel() {
+      dispatchCancelCount += 1;
+    },
+  });
+  response = await sendMcpRequest(oversizedStream);
+  assert.equal(response.status, 413);
+  assert.equal(dispatchCancelCount, 1);
+  assert.match(await response.text(), /262144-byte limit/);
 });
 
 test("metadata tools never expose rounded 64-bit identifiers or sizes", async () => {
@@ -322,6 +628,178 @@ test("metadata tools never expose rounded 64-bit identifiers or sizes", async ()
   assert.equal("hash" in info, false);
 });
 
+test("Bearer-authenticated pCloud API redirects fail closed without a second fetch", async () => {
+  setScenario({
+    virtualPath: "/Documents/note.md",
+    statResponseFactory: () =>
+      new Response(null, {
+        status: 302,
+        headers: { Location: "https://hostile.example/collect" },
+      }),
+  });
+  const result = await callTool("get_file_info", {
+    path: scenario.virtualPath,
+  });
+
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "pCloud HTTP error 302.");
+  assert.equal(pCloudCallCount("/stat"), 1);
+  assert.equal(
+    fetchCalls.filter(({ url }) => url.hostname === "hostile.example").length,
+    0,
+  );
+  const statRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
+  assert.equal(statRequest.request.redirect, "manual");
+  assert.equal(
+    statRequest.request.headers.get("authorization"),
+    `Bearer ${ACCESS_TOKEN}`,
+  );
+  assert.ok(!JSON.stringify(result).includes("hostile.example"));
+  assert.ok(!JSON.stringify(result).includes(ACCESS_TOKEN));
+});
+
+test("pCloud JSON responses are bounded by declared and streamed byte counts", async () => {
+  setScenario({
+    statResponseFactory: () =>
+      streamingResponse([], {
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(PCLOUD_JSON_MAX_BYTES + 1),
+        },
+        onCancel() {
+          pCloudApiCancelCount += 1;
+        },
+        keepOpenOnExhaustion: true,
+      }),
+  });
+  let result = await callTool("get_file_info", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "pCloud returned an invalid JSON response.");
+  assert.equal(pCloudApiCancelCount, 1);
+
+  setScenario({
+    statResponseFactory: () =>
+      streamingResponse(
+        [new Uint8Array(PCLOUD_JSON_MAX_BYTES), new Uint8Array([1])],
+        {
+          headers: { "content-type": "application/json" },
+          onCancel() {
+            pCloudApiCancelCount += 1;
+          },
+          keepOpenOnExhaustion: true,
+        },
+      ),
+  });
+  result = await callTool("get_file_info", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "pCloud returned an invalid JSON response.");
+  assert.equal(pCloudApiCancelCount, 1);
+
+  setScenario({
+    statResponseFactory: () =>
+      new Response(new Uint8Array([0xff]), {
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  result = await callTool("get_file_info", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.equal(result.content[0].text, "pCloud returned an invalid JSON response.");
+});
+
+test("getfilelink JSON uses its own bounded response limit", async () => {
+  const bytes = new TextEncoder().encode("hello");
+  setScenario({
+    bytes,
+    getfilelinkResponseFactory: () =>
+      streamingResponse([], {
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(64 * 1024 + 1),
+        },
+        onCancel() {
+          pCloudApiCancelCount += 1;
+        },
+        keepOpenOnExhaustion: true,
+      }),
+  });
+  const result = await callTool("read_file", {
+    path: scenario.virtualPath,
+    maxBytes: bytes.byteLength,
+  });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud getfilelink returned an invalid response.",
+  );
+  assert.equal(pCloudApiCancelCount, 1);
+  assert.equal(pCloudCallCount(CONTENT_PATH), 0);
+});
+
+test("iterative search reports complete results or explicit safety-limit errors", async () => {
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [
+        {
+          isfolder: true,
+          name: "Folder",
+          contents: [
+            { isfolder: false, name: "match.txt", size: 1 },
+          ],
+        },
+        { isfolder: false, name: "other.txt", size: 1 },
+      ],
+    },
+  });
+  let result = parseToolText(
+    await callTool("search_files", { query: "match", path: "/" }),
+  );
+  assert.equal(result.scannedEntries, 3);
+  assert.equal(result.totalMatches, 1);
+  assert.equal(result.matches[0].path, "/Folder/match.txt");
+  assert.deepEqual(result.safetyLimits, {
+    maxScannedEntries: 10_000,
+    maxDepth: 64,
+  });
+
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: Array.from({ length: 10_001 }, (_, index) => ({
+        isfolder: false,
+        name: `entry-${index}.txt`,
+        size: 1,
+      })),
+    },
+  });
+  let errorResult = await callTool("search_files", {
+    query: "entry",
+    path: "/",
+  });
+  assert.equal(errorResult.isError, true);
+  assert.match(errorResult.content[0].text, /10000-entry safety limit/);
+  assert.match(errorResult.content[0].text, /no complete search result/);
+
+  let nested = { isfolder: false, name: "leaf.txt", size: 1 };
+  for (let depth = 65; depth >= 1; depth -= 1) {
+    nested = {
+      isfolder: true,
+      name: `level-${depth}`,
+      contents: [nested],
+    };
+  }
+  setScenario({
+    listMetadata: { isfolder: true, contents: [nested] },
+  });
+  errorResult = await callTool("search_files", {
+    query: "leaf",
+    path: "/",
+  });
+  assert.equal(errorResult.isError, true);
+  assert.match(errorResult.content[0].text, /64-level nesting safety limit/);
+  assert.match(errorResult.content[0].text, /no complete search result/);
+});
+
 test("virtual-root text retrieval and pre-download byte limits remain enforced", async () => {
   const bytes = new TextEncoder().encode("hello");
   setScenario({
@@ -345,6 +823,46 @@ test("virtual-root text retrieval and pre-download byte limits remain enforced",
   assert.equal(pCloudCallCount("/getfilelink"), 1);
   assert.equal(pCloudCallCount(CONTENT_PATH), 1);
   assert.ok(!JSON.stringify(result).includes(ROOT_PATH));
+
+  setScenario({
+    virtualPath: "/Documents/note.md",
+    bytes,
+    metadata: {
+      isfolder: false,
+      name: "note.md",
+      size: bytes.byteLength + 1,
+      contenttype: "text/markdown",
+    },
+  });
+  const shorterBody = await callTool("read_file", {
+    path: scenario.virtualPath,
+    maxBytes: bytes.byteLength + 1,
+  });
+  assert.equal(shorterBody.isError, true);
+  assert.equal(
+    shorterBody.content[0].text,
+    "pCloud returned an incomplete or inconsistent text file body.",
+  );
+
+  setScenario({
+    virtualPath: "/Documents/note.md",
+    bytes,
+    metadata: {
+      isfolder: false,
+      name: "note.md",
+      size: bytes.byteLength - 1,
+      contenttype: "text/markdown",
+    },
+  });
+  const longerBody = await callTool("read_file", {
+    path: scenario.virtualPath,
+    maxBytes: bytes.byteLength,
+  });
+  assert.equal(longerBody.isError, true);
+  assert.equal(
+    longerBody.content[0].text,
+    "pCloud returned an incomplete or inconsistent text file body.",
+  );
 
   setScenario({
     virtualPath: "/Documents/note.md",
