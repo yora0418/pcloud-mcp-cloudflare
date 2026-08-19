@@ -13,9 +13,8 @@
   },
   "homepage": "https://github.com/yora0418/pcloud-mcp-cloudflare#readme",
   "engines": {
-    "node": ">=22.0.0"
+    "node": "^22.18.0 || >=24.11.0"
   },
-  "packageManager": "npm@11.13.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

@@ -6,7 +6,7 @@ External dashboards and client capabilities change over time. Use the linked ven
 
 ## Prerequisites
 
-- Node.js 22 or later and npm. The repository records the validated npm version in `package.json` and dependency versions in `package-lock.json`.
+- Node.js 22.18.0 or later on a supported release line (`^22.18.0 || >=24.11.0`) and a compatible npm release. CI validates the exact 22.18.0 minimum; no exact npm version is required. Dependency versions are recorded in `package-lock.json`.
 - A Cloudflare account with Workers and a Cloudflare Zero Trust organization with an identity provider.
 - A pCloud account and a pCloud application registered through [pCloud My Apps](https://docs.pcloud.com/my_apps/).
 - An MCP client that can connect to a remote HTTP MCP server and complete OAuth. For ChatGPT, confirm that your plan and workspace allow custom MCP apps and developer mode in the [current OpenAI documentation](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta).
