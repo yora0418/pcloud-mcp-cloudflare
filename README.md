@@ -65,6 +65,8 @@ All path-based tools stay beneath that virtual root. When a scoped root is confi
 
 If `PCLOUD_ROOT_PATH` is unset, the real pCloud root remains visible as `/`.
 
+Read-only access prevents the MCP from modifying pCloud files, but it does not prevent an authorized MCP client from receiving readable file contents. Configure `PCLOUD_ROOT_PATH` to expose only a subtree whose contents may be disclosed to the connected client.
+
 ## Search behavior
 
 `search_files` currently performs metadata search only. It uses pCloud recursive folder listing, walks the returned tree in the Worker, and performs case-insensitive substring matching against names and reconstructed virtual paths.
@@ -81,7 +83,7 @@ The default maximum file size is 256 KiB (`262144` bytes). A caller may lower th
 
 `get_image_content` is a separate read-only path for PNG and JPEG files. It accepts an exact virtual path and returns the complete image directly as MCP ImageContent after validating metadata, source size, and the downloaded binary signature. The image source-file hard limit is 5 MiB (`5242880` bytes), independent of the smaller inline UTF-8 text limits used by `read_file`.
 
-`get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker checks the supported extension and MIME metadata plus the standard ZIP local-header signature, but does not inspect, decompress, or validate ZIP entries or XML. Office document validity and content interpretation are delegated to the MCP client. PDF, legacy Office formats, macro-enabled extensions, and arbitrary ZIP paths are not supported. Live ChatGPT integration validation remains pending.
+`get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker checks the supported extension and MIME metadata plus the standard ZIP local-header signature, but does not inspect, decompress, or validate ZIP entries or XML. Office document validity and content interpretation are delegated to the MCP client. PDF, legacy Office formats, macro-enabled extensions, and arbitrary ZIP paths are not supported. ChatGPT MCP integration has confirmed native Office handling for all three supported formats; this validation does not claim quantitative parity with direct file uploads.
 
 ## Runtime
 

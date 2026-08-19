@@ -198,6 +198,7 @@ Retrieve an OOXML Office file by exact virtual path and return its original byte
 - returns only the original base64-encoded package bytes with the canonical Office MIME type and an opaque custom resource URI; ZIP entries and XML are not returned separately
 - uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as the existing content tools
 - does not support PDF, legacy `.doc`/`.xls`/`.ppt`, macro-enabled Office extensions, or arbitrary ZIP paths
+- integration validation confirmed ChatGPT native Office handling for DOCX, XLSX, and PPTX through the deployed MCP; no quantitative parity with direct file uploads is claimed
 
 ## pCloud-specific implementation notes
 
@@ -309,12 +310,13 @@ Rationale under consideration: if modified versions are offered to other users a
 - enforce metadata, binary-signature, source-size, and virtual-root checks
 - validate PNG and JPEG ImageContent delivery through a deployed Worker and ChatGPT Vision
 
-### Phase 7 — Office content — implementation complete, integration validation pending
+### Phase 7 — Office content — complete
 
 - implement `get_office_content` for DOCX, XLSX, and PPTX files
 - return the original bounded package bytes as an MCP embedded binary resource
 - validate metadata, source size, and a lightweight ZIP signature without inspecting package internals
-- verify native Office handling against a deployed Worker and ChatGPT MCP before marking the phase complete
+- validate native Office handling for all three supported formats through a deployed Worker and ChatGPT MCP, including document structure and text, slide text/tables/values/layout, and workbook cells/formulas/results/cross-sheet references/charts
+- treat direct-upload parity as unmeasured rather than claiming equivalence
 
 ### Later
 
