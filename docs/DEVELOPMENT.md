@@ -121,6 +121,14 @@ Run the TypeScript validation used by the project:
 npm.cmd run typecheck
 ```
 
+Run the tracked unit and mocked Worker/MCP regression tests:
+
+```powershell
+npm.cmd test
+```
+
+The regression suite builds a temporary Wrangler dry-run bundle and uses only generated JWT keys and mocked pCloud responses. It does not require deployment credentials or contact a pCloud account.
+
 The PowerShell `.cmd` form is shown because some Windows environments block the `npm.ps1`/`npx.ps1` shims through execution policy.
 
 ## Deployment boundary
