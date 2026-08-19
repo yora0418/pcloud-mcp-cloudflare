@@ -47,6 +47,35 @@ const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
 const HARD_READ_MAX_BYTES = 1024 * 1024;
 const HARD_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const HARD_OFFICE_MAX_BYTES = 1024 * 1024;
+const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
+
+type SupportedOfficeMimeType =
+  | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+type SupportedOfficeFormat = {
+  extension: ".docx" | ".xlsx" | ".pptx";
+  mimeType: SupportedOfficeMimeType;
+};
+
+const SUPPORTED_OFFICE_FORMATS: readonly SupportedOfficeFormat[] = [
+  {
+    extension: ".docx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  },
+  {
+    extension: ".xlsx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  },
+  {
+    extension: ".pptx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  },
+];
 
 type SupportedImageMimeType = "image/png" | "image/jpeg";
 type SupportedImageFormat = {
@@ -88,6 +117,12 @@ const GENERIC_MIME_TYPES = new Set([
   "application/unknown",
   "application/x-empty",
   "binary/octet-stream",
+]);
+
+const OFFICE_CONTAINER_FALLBACK_MIME_TYPES = new Set([
+  ...GENERIC_MIME_TYPES,
+  "application/zip",
+  "application/x-zip-compressed",
 ]);
 
 const TEXT_FILE_EXTENSIONS = new Set([
@@ -701,6 +736,50 @@ function detectSupportedImageMimeType(
   return SUPPORTED_IMAGE_FORMATS.find((format) =>
     hasByteSignature(bytes, format.signature),
   )?.mimeType;
+}
+
+function getExpectedOfficeFormat(
+  name: string,
+  contentType: string | undefined,
+  virtualPath: string,
+): SupportedOfficeFormat {
+  const extension = getFileExtension(name);
+  const format = SUPPORTED_OFFICE_FORMATS.find(
+    (candidate) => candidate.extension === extension,
+  );
+  if (!format) {
+    throw new Error(
+      `File at virtual path ${JSON.stringify(virtualPath)} is not a supported DOCX, XLSX, or PPTX file.`,
+    );
+  }
+
+  const mimeType = normalizeMimeType(contentType);
+  if (
+    mimeType !== format.mimeType &&
+    !OFFICE_CONTAINER_FALLBACK_MIME_TYPES.has(mimeType)
+  ) {
+    throw new Error(
+      `File metadata at virtual path ${JSON.stringify(virtualPath)} does not match the expected Office format.`,
+    );
+  }
+
+  return format;
+}
+
+async function createOfficeResourceUri(
+  virtualPath: string,
+  extension: SupportedOfficeFormat["extension"],
+): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(virtualPath),
+    ),
+  );
+  const opaqueId = Array.from(digest, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `pcloud-office://content/${opaqueId}${extension}`;
 }
 
 function encodeBytesAsBase64(bytes: Uint8Array): string {
@@ -1367,6 +1446,106 @@ function createServer(env: Env) {
                 error instanceof Error
                   ? error.message
                   : "Unknown pCloud read_file error.",
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_office_content",
+    {
+      description:
+        "Return a DOCX, XLSX, or PPTX file as an MCP embedded binary resource after validating its exact virtual path, Office metadata, ZIP signature, and 1 MiB source-file limit. This tool is read-only.",
+      inputSchema: {
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .describe(
+            "Required virtual absolute DOCX, XLSX, or PPTX path. File IDs are not accepted.",
+          ),
+      },
+    },
+    async ({ path }) => {
+      try {
+        const file = await statVirtualFile(env, path);
+        const name = getVirtualFileName(file.metadata, file.virtualPath);
+        if (!name.trim()) {
+          throw new Error("pCloud stat returned invalid Office file metadata.");
+        }
+
+        const contentType = optionalString(file.metadata.contenttype);
+        const size = getFileSize(file.metadata, file.virtualPath);
+        const format = getExpectedOfficeFormat(
+          name,
+          contentType,
+          file.virtualPath,
+        );
+
+        if (size > HARD_OFFICE_MAX_BYTES) {
+          throw new Error(
+            `Office file at virtual path ${JSON.stringify(file.virtualPath)} is ${size} bytes, which exceeds the hard maximum of ${HARD_OFFICE_MAX_BYTES} bytes.`,
+          );
+        }
+
+        let bytes: Uint8Array;
+        try {
+          bytes = await readPCloudFileBytes(
+            env,
+            file.physicalPath,
+            HARD_OFFICE_MAX_BYTES,
+          );
+        } catch (error) {
+          if (error instanceof PCloudContentLimitError) {
+            throw new Error(
+              `Office file at virtual path ${JSON.stringify(file.virtualPath)} exceeds the hard maximum of ${error.allowedBytes} bytes.`,
+            );
+          }
+
+          throw error;
+        }
+
+        if (bytes.byteLength !== size) {
+          throw new Error(
+            "pCloud returned an incomplete or inconsistent Office file body.",
+          );
+        }
+
+        if (!hasByteSignature(bytes, OOXML_ZIP_SIGNATURE)) {
+          throw new Error(
+            "pCloud returned content that does not have the expected OOXML ZIP signature.",
+          );
+        }
+
+        const resourceUri = await createOfficeResourceUri(
+          file.virtualPath,
+          format.extension,
+        );
+
+        return {
+          content: [
+            {
+              type: "resource",
+              resource: {
+                uri: resourceUri,
+                mimeType: format.mimeType,
+                blob: encodeBytesAsBase64(bytes),
+              },
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown pCloud get_office_content error.",
             },
           ],
         };

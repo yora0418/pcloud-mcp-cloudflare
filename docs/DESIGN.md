@@ -37,6 +37,7 @@ Allowed capabilities:
 - retrieve file metadata
 - read supported file contents
 - retrieve supported image content
+- retrieve supported Office content
 
 Explicitly out of scope for v1:
 
@@ -185,6 +186,20 @@ Retrieve a supported image by exact virtual path and return it directly as MCP I
 - uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as `read_file`
 - does not expose physical paths, temporary download URLs, file contents in logs, or caller-supplied file-ID access
 
+### `get_office_content`
+
+Retrieve an OOXML Office file by exact virtual path and return its original bytes as an MCP embedded binary resource. The initial implementation:
+
+- supports `.docx`, `.xlsx`, and `.pptx` with their format-specific MIME types
+- accepts the matching canonical MIME type, or a generic/ZIP container MIME when the extension is supported
+- enforces a 1 MiB source-file hard limit through metadata, `Content-Length`, streaming byte count, and exact metadata/body-size checks
+- verifies the standard ZIP local-header signature after download to reject obvious non-ZIP content
+- intentionally does not inspect ZIP metadata or entries, decompress data, validate XML or package parts, or act as an Office integrity checker; Office validity and content interpretation belong to the MCP client
+- returns only the original base64-encoded package bytes with the canonical Office MIME type and an opaque custom resource URI; ZIP entries and XML are not returned separately
+- uses the same `getfilelink`, HTTPS `*.pcloud.com` content-host validation, manual redirect policy, streaming byte bound, and virtual-root boundary as the existing content tools
+- does not support PDF, legacy `.doc`/`.xls`/`.ppt`, macro-enabled Office extensions, or arbitrary ZIP paths
+- integration validation confirmed ChatGPT native Office handling for DOCX, XLSX, and PPTX through the deployed MCP; no quantitative parity with direct file uploads is claimed
+
 ## pCloud-specific implementation notes
 
 Implementation must account for pCloud's API/OAuth behavior, including regional API host handling where required.
@@ -294,6 +309,14 @@ Rationale under consideration: if modified versions are offered to other users a
 - return bounded image bytes directly as MCP ImageContent
 - enforce metadata, binary-signature, source-size, and virtual-root checks
 - validate PNG and JPEG ImageContent delivery through a deployed Worker and ChatGPT Vision
+
+### Phase 7 — Office content — complete
+
+- implement `get_office_content` for DOCX, XLSX, and PPTX files
+- return the original bounded package bytes as an MCP embedded binary resource
+- validate metadata, source size, and a lightweight ZIP signature without inspecting package internals
+- validate native Office handling for all three supported formats through a deployed Worker and ChatGPT MCP, including document structure and text, slide text/tables/values/layout, and workbook cells/formulas/results/cross-sheet references/charts
+- treat direct-upload parity as unmeasured rather than claiming equivalence
 
 ### Later
 
