@@ -216,7 +216,7 @@ Implementation must account for pCloud's API/OAuth behavior, including regional 
 
 The pCloud root folder has folder ID `0`, but scoped deployments intentionally avoid treating that physical root as the MCP root.
 
-`search_files` deliberately avoids pCloud recursive `listfolder` responses. It reconstructs paths from validated names while requesting each folder non-recursively, keeping every JSON response independently bounded and reapplying the scoped parent path at each step.
+`search_files` deliberately avoids pCloud recursive `listfolder` responses. A production diagnostic measured an unfiltered recursive whole-tree response at more than 32 MiB, so that strategy is unsuitable for the bounded v0.1 search path. The Worker instead reconstructs paths from validated names while requesting each folder non-recursively, keeping every JSON response independently bounded and reapplying the scoped parent path at each step.
 
 pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
@@ -353,11 +353,12 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending final external review
 
-#### Phase 8.4 — external audit remediation — implementation complete, independent re-audit pending
+#### Phase 8.4 — external audit remediation — implementation and production integration complete, independent re-audit pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
 - make folder-by-folder metadata search iterative and bounded, and require exact text metadata/body size consistency
+- validate the default 45-call search bound in production: complete bounded subtrees succeed, while larger trees fail explicitly without partial results before an opaque platform subrequest failure
 - disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
 - retain the existing embedded Office resource transport without adding standalone resource APIs
 

@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication pending. The core read-only tools and production integrations through Phase 8.1 are validated. The repository remains private pending final external review and release steps.
+> **Status:** v0.1 release candidate; publication pending. Phase 8.4 implementation and production integration validation are complete. The repository remains private pending independent external re-audit and release steps.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
@@ -73,6 +73,8 @@ Read-only access prevents the MCP from modifying pCloud files, but it does not p
 ## Search behavior
 
 `search_files` currently performs metadata search only. It requests one non-recursive pCloud folder listing at a time and walks folders iteratively in the Worker, performing case-insensitive substring matching against names and reconstructed virtual paths. Response-derived folder names are validated before they are joined to the already-scoped physical and virtual parent paths; caller-supplied or response-derived folder IDs are not used for traversal.
+
+A production payload diagnostic measured the unfiltered recursive whole-tree response at more than 32 MiB, so v0.1 deliberately does not use pCloud `listfolder recursive=1` for search.
 
 It does **not** search inside file contents.
 
