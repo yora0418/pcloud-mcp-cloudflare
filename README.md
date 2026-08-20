@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication pending. The core read-only tools and production integrations through Phase 8.1 are validated. The repository remains private pending final external review and release steps.
+> **Status:** v0.1 release candidate; publication pending. Phase 8.4 implementation and production integration validation are complete. The repository remains private pending independent external re-audit and release steps.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
@@ -43,6 +43,7 @@ Runtime configuration includes:
 - `POLICY_AUD` — Cloudflare Access Application Audience tag
 - `PCLOUD_API_HOST` — `api.pcloud.com` for US accounts or `eapi.pcloud.com` for EU accounts
 - `PCLOUD_ROOT_PATH` — optional physical pCloud folder exposed as MCP `/`, for example `/Sync`
+- `PCLOUD_SEARCH_MAX_FOLDER_CALLS` — optional complete-search folder-listing limit; defaults to `45` and may be raised to at most `1024`
 
 Secret configuration:
 
@@ -71,9 +72,13 @@ Read-only access prevents the MCP from modifying pCloud files, but it does not p
 
 ## Search behavior
 
-`search_files` currently performs metadata search only. It uses pCloud recursive folder listing, walks the returned tree in the Worker, and performs case-insensitive substring matching against names and reconstructed virtual paths.
+`search_files` currently performs metadata search only. It requests one non-recursive pCloud folder listing at a time and walks folders iteratively in the Worker, performing case-insensitive substring matching against names and reconstructed virtual paths. Response-derived folder names are validated before they are joined to the already-scoped physical and virtual parent paths; caller-supplied or response-derived folder IDs are not used for traversal.
+
+A production payload diagnostic measured the unfiltered recursive whole-tree response at more than 32 MiB, so v0.1 deliberately does not use pCloud `listfolder recursive=1` for search.
 
 It does **not** search inside file contents.
+
+Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, and by default 45 folder listings. If a safety limit is reached while folders remain, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
 
 ## File metadata, text reading, image content, and Office content
 
@@ -81,11 +86,17 @@ It does **not** search inside file contents.
 
 `read_file` is text-only. It accepts supported text MIME types and a conservative text-extension allowlist when pCloud reports a generic MIME type. Binary and unsupported formats are rejected before their contents are fetched. It retrieves raw file bytes through a temporary pCloud content link and decodes them strictly as UTF-8; non-UTF-8 text is rejected. Support for additional encodings may be added later.
 
-The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received.
+The default maximum file size is 256 KiB (`262144` bytes). A caller may lower that limit or raise it to at most 1 MiB (`1048576` bytes) with `maxBytes`. Files above the selected limit are rejected without a partial read. The raw response is checked against the same limit while it is received and must exactly match the metadata size.
 
 `get_image_content` is a separate read-only path for PNG and JPEG files. It accepts an exact virtual path and returns the complete image directly as MCP ImageContent after validating metadata, source size, and the downloaded binary signature. The image source-file hard limit is 5 MiB (`5242880` bytes), independent of the smaller inline UTF-8 text limits used by `read_file`.
 
 `get_office_content` is a separate read-only path for DOCX, XLSX, and PPTX files. It accepts an exact virtual path and returns the original file bytes with the format-specific MIME type as an MCP embedded binary resource. The Office source-file hard limit is 1 MiB (`1048576` bytes). The Worker checks the supported extension and MIME metadata plus the standard ZIP local-header signature, but does not inspect, decompress, or validate ZIP entries or XML. Office document validity and content interpretation are delegated to the MCP client. PDF, legacy Office formats, macro-enabled extensions, and arbitrary ZIP paths are not supported. ChatGPT MCP integration has confirmed native Office handling for all three supported formats; this validation does not claim quantitative parity with direct file uploads.
+
+Office bytes are carried as an embedded resource inside the tool result; the Worker does not expose standalone `resources/list` or `resources/read` APIs. Other MCP clients must support embedded resource content in tool results to consume this output.
+
+## Request safety limits
+
+Authenticated `/mcp` POST bodies are streamed through a 256 KiB (`262144` byte) gate before they reach the MCP SDK. Requests over the limit receive HTTP 413. The Worker also applies a Cloudflare Rate Limiting binding to authenticated MCP POST requests at 120 requests per 60 seconds per verified Access principal. The binding is a protective, location-local approximate limiter rather than an accounting mechanism; binding absence or failure causes MCP POST requests to fail closed with HTTP 503.
 
 ## Runtime
 

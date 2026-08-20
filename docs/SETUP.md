@@ -60,7 +60,7 @@ If you use a custom domain or route instead of the generated Workers hostname, c
 2. Add an Allow policy limited to the identities that should be able to read the exposed pCloud content. Access applications deny unmatched users by default.
 3. Enable **Managed OAuth** so non-browser MCP clients can authenticate through an authorization-code flow. Follow Cloudflare's [Managed OAuth guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/), including redirect-client restrictions appropriate for your MCP client.
 4. Copy the Cloudflare Zero Trust team domain and the application's Audience (AUD) tag. Cloudflare documents where to find the AUD tag in its [JWT validation guide](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/).
-5. Protect the entire Worker hostname, including `/mcp`. Include preview deployments in the Access application or disable preview URLs, and do not create an unprotected alternate route to the same Worker.
+5. Protect the entire Worker hostname, including `/mcp`, and do not create an unprotected alternate route to the same Worker. The tracked Wrangler configuration explicitly disables both versioned and aliased Preview URLs while retaining the normal production `workers.dev` endpoint.
 
 The Worker independently validates the `Cf-Access-Jwt-Assertion` signature, issuer, audience, and RS256 algorithm after Cloudflare Access allows the request.
 
@@ -74,9 +74,12 @@ Configure the following under the Worker's **Settings > Variables and Secrets**.
 | `POLICY_AUD` | Variable | Audience tag of the Access application protecting this Worker |
 | `PCLOUD_API_HOST` | Variable | Exactly `api.pcloud.com` or `eapi.pcloud.com`, matching the OAuth result |
 | `PCLOUD_ROOT_PATH` | Variable | Optional absolute pCloud folder to expose as MCP `/`; omit it only if the entire pCloud root may be read by the client |
+| `PCLOUD_SEARCH_MAX_FOLDER_CALLS` | Variable | Optional canonical integer from `1` to `1024`; defaults to `45` complete-search folder listings |
 | `PCLOUD_ACCESS_TOKEN` | Secret | The pCloud OAuth access token |
 
 For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data the connected client may receive. Do not use `.` or `..` path segments. Read-only behavior prevents file mutation but does not prevent disclosure of readable content.
+
+The default search limit leaves headroom below the Workers Free external-subrequest ceiling. Prefer narrower `search_files` paths for large trees. Increase `PCLOUD_SEARCH_MAX_FOLDER_CALLS` only when the selected Workers plan provides enough per-request external-subrequest allowance; malformed or out-of-range values make searches fail closed.
 
 You can enter the pCloud token interactively without placing it on a command line:
 
@@ -85,6 +88,8 @@ npx.cmd wrangler secret put PCLOUD_ACCESS_TOKEN
 ```
 
 The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables and secrets.
+
+It also defines the non-secret `MCP_RATE_LIMITER` binding with a default of 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Its `namespace_id` is a positive-integer string required by Cloudflare. If namespace `1001` is already used by another rate-limit binding in the same Cloudflare account, select a different unused positive integer before the first deployment; bindings sharing a namespace also share counters for matching keys. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
 
 ## 6. Deploy and verify
 
@@ -118,6 +123,8 @@ For ChatGPT, follow OpenAI's [current custom MCP app instructions](https://help.
 6. Call `list_folder` with path `/` and confirm that it exposes only the intended `PCLOUD_ROOT_PATH` subtree before reading content.
 
 Client-side model behavior and support for image or embedded Office content are client capabilities, not guarantees made by the Worker.
+
+`get_office_content` returns its binary resource inside a tool result. It does not register standalone `resources/list` or `resources/read` APIs, so a general MCP client must support embedded resource content in tool results to consume Office bytes.
 
 ## Updating
 

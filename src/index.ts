@@ -3,6 +3,16 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { verifyCloudflareAccess } from "./access";
 import {
+  checkMcpRateLimit,
+  dispatchBoundedMcpRequest,
+  McpRequestBodyError,
+  type RateLimitBinding,
+} from "./mcp-request-guards";
+import {
+  getPCloudSearchMaxFolderCalls,
+  normalizePCloudApiHost,
+} from "./pcloud-config";
+import {
   optionalPCloudId,
   optionalPCloudSize,
   safePCloudSizeNumber,
@@ -18,6 +28,8 @@ type Env = McpBaseEnv & {
   PCLOUD_ACCESS_TOKEN?: string;
   PCLOUD_API_HOST?: string;
   PCLOUD_ROOT_PATH?: string;
+  PCLOUD_SEARCH_MAX_FOLDER_CALLS?: string;
+  MCP_RATE_LIMITER?: RateLimitBinding;
 };
 
 type PCloudMetadata = Record<string, unknown> & {
@@ -43,16 +55,16 @@ class PCloudContentLimitError extends Error {
   }
 }
 
-const ALLOWED_PCLOUD_API_HOSTS = new Set([
-  "api.pcloud.com",
-  "eapi.pcloud.com",
-]);
 const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
 const HARD_READ_MAX_BYTES = 1024 * 1024;
 const HARD_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const HARD_OFFICE_MAX_BYTES = 1024 * 1024;
+const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
+const PCLOUD_GETFILELINK_JSON_MAX_BYTES = 64 * 1024;
+const SEARCH_MAX_SCANNED_ENTRIES = 10_000;
+const SEARCH_MAX_DEPTH = 64;
 const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
 const LOCAL_READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -172,23 +184,6 @@ const TEXT_FILE_EXTENSIONS = new Set([
   ".yml",
 ]);
 
-function normalizePCloudApiHost(value: string): string {
-  const raw = value.trim();
-  const url = new URL(
-    raw.startsWith("http://") || raw.startsWith("https://")
-      ? raw
-      : `https://${raw}`,
-  );
-
-  if (url.protocol !== "https:" || !ALLOWED_PCLOUD_API_HOSTS.has(url.hostname)) {
-    throw new Error(
-      "PCLOUD_API_HOST must be api.pcloud.com or eapi.pcloud.com.",
-    );
-  }
-
-  return url.hostname;
-}
-
 function normalizeAbsolutePath(value: string, label: string): string {
   const path = value.trim();
 
@@ -291,6 +286,7 @@ async function fetchPCloud(
         Accept: accept,
         Authorization: `Bearer ${accessToken}`,
       },
+      redirect: "manual",
     });
   } catch {
     throw new Error("pCloud request failed before a response was received.");
@@ -429,12 +425,12 @@ async function getPCloudFileContentUrl(
     throw new Error(`pCloud getfilelink HTTP error ${response.status}.`);
   }
 
-  let rawData: unknown;
-  try {
-    rawData = await response.json();
-  } catch {
-    throw new Error("pCloud getfilelink returned an invalid JSON response.");
-  }
+  const rawData = await parseBoundedPCloudJson(
+    response,
+    PCLOUD_GETFILELINK_JSON_MAX_BYTES,
+    "pCloud getfilelink returned an invalid response.",
+    `pCloud getfilelink JSON response exceeded the ${PCLOUD_GETFILELINK_JSON_MAX_BYTES}-byte safety limit.`,
+  );
 
   if (!isRecord(rawData)) {
     throw new Error("pCloud getfilelink returned an invalid response.");
@@ -486,7 +482,12 @@ async function callPCloudJson(
     throw new Error(`pCloud HTTP error ${response.status}.`);
   }
 
-  const rawData: unknown = await response.json();
+  const rawData = await parseBoundedPCloudJson(
+    response,
+    PCLOUD_JSON_MAX_BYTES,
+    "pCloud returned an invalid JSON response.",
+    `pCloud JSON response exceeded the ${PCLOUD_JSON_MAX_BYTES}-byte safety limit.`,
+  );
   if (!isRecord(rawData)) {
     throw new Error("pCloud returned an invalid JSON response.");
   }
@@ -498,11 +499,7 @@ async function callPCloudJson(
         : undefined,
     metadata: isRecord(rawData.metadata) ? rawData.metadata : undefined,
   };
-  const result = Number(data.result ?? 0);
-
-  if (!Number.isSafeInteger(result) || result < 0) {
-    throw new Error("pCloud returned an invalid result code.");
-  }
+  const result = parsePCloudResultCode(data.result ?? 0);
 
   if (result !== 0) {
     throw new PCloudApiError(String(result));
@@ -883,6 +880,55 @@ async function readResponseBytesWithinLimit(
   return bytes;
 }
 
+function getSearchFolderContents(
+  metadata: Record<string, unknown> | undefined,
+): Array<Record<string, unknown>> {
+  if (!metadata || !Array.isArray(metadata.contents)) {
+    throw new Error("pCloud listfolder returned invalid folder metadata.");
+  }
+
+  if (!metadata.contents.every(isRecord)) {
+    throw new Error("pCloud listfolder returned invalid folder metadata.");
+  }
+
+  return metadata.contents;
+}
+
+function getSearchEntryName(entry: Record<string, unknown>): string {
+  const name = entry.name;
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name === "." ||
+    name === ".." ||
+    name.includes("/") ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw new Error("pCloud listfolder returned an invalid entry name.");
+  }
+
+  return name;
+}
+
+async function parseBoundedPCloudJson(
+  response: Response,
+  maxBytes: number,
+  errorMessage: string,
+  limitErrorMessage: string,
+): Promise<unknown> {
+  try {
+    const bytes = await readResponseBytesWithinLimit(response, maxBytes);
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    if (error instanceof PCloudContentLimitError) {
+      throw new Error(limitErrorMessage);
+    }
+
+    throw new Error(errorMessage);
+  }
+}
+
 function validatePCloudContentResponse(response: Response): void {
   if (!response.ok) {
     throw new Error(`pCloud content HTTP error ${response.status}.`);
@@ -921,8 +967,14 @@ async function readPCloudText(
   env: Env,
   physicalPath: string,
   maxBytes: number,
+  expectedBytes: number,
 ): Promise<{ text: string; byteLength: number }> {
   const bytes = await readPCloudFileBytes(env, physicalPath, maxBytes);
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(
+      "pCloud returned an incomplete or inconsistent text file body.",
+    );
+  }
   let text: string;
 
   try {
@@ -1145,37 +1197,74 @@ function createServer(env: Env) {
         }
 
         const resolved = resolveVirtualPath(env, path);
-        const data = await callPCloudJson(env, "listfolder", {
-          path: resolved.physicalPath,
-          recursive: "1",
-        });
-
-        const rootMetadata = data.metadata ?? {};
+        const maxFolderApiCalls = getPCloudSearchMaxFolderCalls(
+          env.PCLOUD_SEARCH_MAX_FOLDER_CALLS,
+        );
         const lowerNeedle = needle.toLocaleLowerCase();
         const returnFolders = includeFolders ?? true;
         const limit = maxResults ?? 50;
         const matches: ReturnType<typeof compactPCloudEntry>[] = [];
         let scannedEntries = 0;
         let totalMatches = 0;
+        let folderApiCalls = 0;
 
-        const visit = (
-          entries: Array<Record<string, unknown>>,
-          parentVirtualPath: string,
-        ) => {
+        type SearchFolder = {
+          virtualPath: string;
+          physicalPath: string;
+          depth: number;
+        };
+        const pendingFolders: SearchFolder[] = [
+          {
+            virtualPath: resolved.virtualPath,
+            physicalPath: resolved.physicalPath,
+            depth: 0,
+          },
+        ];
+        let nextFolderIndex = 0;
+
+        while (nextFolderIndex < pendingFolders.length) {
+          if (folderApiCalls >= maxFolderApiCalls) {
+            throw new Error(
+              `Search reached the ${maxFolderApiCalls}-folder/API-call safety limit while folders remained; no complete search result was returned. Retry with a narrower path. Increasing PCLOUD_SEARCH_MAX_FOLDER_CALLS requires a Cloudflare Workers plan with sufficient external subrequest allowance.`,
+            );
+          }
+
+          const folder = pendingFolders[nextFolderIndex];
+          nextFolderIndex += 1;
+          folderApiCalls += 1;
+          const data = await callPCloudJson(env, "listfolder", {
+            path: folder.physicalPath,
+          });
+          const entries = getSearchFolderContents(data.metadata);
+
           for (const entry of entries) {
             scannedEntries += 1;
-
-            const name = typeof entry.name === "string" ? entry.name : "";
-            if (!name) {
-              continue;
+            if (scannedEntries > SEARCH_MAX_SCANNED_ENTRIES) {
+              throw new Error(
+                `Search exceeded the ${SEARCH_MAX_SCANNED_ENTRIES}-entry safety limit; no complete search result was returned.`,
+              );
             }
 
-            const virtualPath = joinVirtualPath(parentVirtualPath, name);
+            const entryDepth = folder.depth + 1;
+            if (entryDepth > SEARCH_MAX_DEPTH) {
+              throw new Error(
+                `Search exceeded the ${SEARCH_MAX_DEPTH}-level nesting safety limit; no complete search result was returned.`,
+              );
+            }
+
+            const name = getSearchEntryName(entry);
+            if (typeof entry.isfolder !== "boolean") {
+              throw new Error(
+                "pCloud listfolder returned invalid entry metadata.",
+              );
+            }
+
+            const virtualPath = joinVirtualPath(folder.virtualPath, name);
             const relativePath = relativeSearchPath(
               resolved.virtualPath,
               virtualPath,
             );
-            const isFolder = entry.isfolder === true;
+            const isFolder = entry.isfolder;
             const searchable = `${name}\n${relativePath}`.toLocaleLowerCase();
             const matchesQuery = searchable.includes(lowerNeedle);
 
@@ -1187,15 +1276,14 @@ function createServer(env: Env) {
             }
 
             if (isFolder) {
-              const children = getMetadataContents(entry);
-              if (children.length > 0) {
-                visit(children, virtualPath);
-              }
+              pendingFolders.push({
+                virtualPath,
+                physicalPath: joinVirtualPath(folder.physicalPath, name),
+                depth: entryDepth,
+              });
             }
           }
-        };
-
-        visit(getMetadataContents(rootMetadata), resolved.virtualPath);
+        }
 
         const result = {
           query: needle,
@@ -1203,9 +1291,15 @@ function createServer(env: Env) {
           includeFolders: returnFolders,
           matches,
           scannedEntries,
+          folderApiCalls,
           totalMatches,
           returnedMatches: matches.length,
           truncated: totalMatches > matches.length,
+          safetyLimits: {
+            maxScannedEntries: SEARCH_MAX_SCANNED_ENTRIES,
+            maxDepth: SEARCH_MAX_DEPTH,
+            maxFolderApiCalls,
+          },
           searchType: "metadata-name-and-path-substring",
         };
 
@@ -1428,6 +1522,7 @@ function createServer(env: Env) {
             env,
             file.physicalPath,
             allowedBytes,
+            size,
           );
         } catch (error) {
           if (error instanceof PCloudContentLimitError) {
@@ -1584,8 +1679,8 @@ export default {
     env: Env,
     ctx: McpExecutionContext,
   ): Promise<Response> {
-    const authenticated = await verifyCloudflareAccess(request, env);
-    if (!authenticated) {
+    const principal = await verifyCloudflareAccess(request, env);
+    if (!principal) {
       return new Response("Forbidden", {
         status: 403,
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -1595,6 +1690,46 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/mcp") {
+      if (request.method === "POST") {
+        const rateLimitDecision = await checkMcpRateLimit(
+          env.MCP_RATE_LIMITER,
+          principal.rateLimitKey,
+        );
+        if (rateLimitDecision === "limited") {
+          return new Response("Too Many Requests", {
+            status: 429,
+            headers: {
+              "content-type": "text/plain; charset=utf-8",
+              "retry-after": "60",
+            },
+          });
+        }
+        if (rateLimitDecision === "unavailable") {
+          return new Response("Service Unavailable", {
+            status: 503,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          });
+        }
+
+        try {
+          return await dispatchBoundedMcpRequest(
+            request,
+            (guardedRequest) => {
+              const mcpHandler = createMcpHandler(() => createServer(env));
+              return mcpHandler(guardedRequest, env, ctx);
+            },
+          );
+        } catch (error) {
+          if (error instanceof McpRequestBodyError) {
+            return new Response(error.message, {
+              status: error.status,
+              headers: { "content-type": "text/plain; charset=utf-8" },
+            });
+          }
+          throw error;
+        }
+      }
+
       const mcpHandler = createMcpHandler(() => createServer(env));
       return mcpHandler(request, env, ctx);
     }

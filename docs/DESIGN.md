@@ -70,6 +70,10 @@ They are configuration values rather than application secrets, but are intention
 
 Cloudflare Managed OAuth is used so compatible non-browser MCP clients can authenticate through Access. The client receives an opaque OAuth token; Cloudflare resolves it at the edge and forwards the signed Access assertion to the Worker.
 
+After successful JWT verification, authenticated `/mcp` POST requests are rate-limited through the `MCP_RATE_LIMITER` Workers binding before request-body parsing or MCP SDK dispatch. The key uses a non-empty verified JWT `sub`, otherwise verified `common_name`, otherwise a shared conservative fallback. Email is not used. The default is 120 requests per 60 seconds per principal; Cloudflare rate limits are approximate and local to a Cloudflare location. Missing, invalid, or failed enforcement returns HTTP 503 rather than bypassing the boundary.
+
+MCP POST bodies pass through an application-level 256 KiB streaming limit before reaching the SDK. Canonical `Content-Length` values above the limit are rejected before buffering, but the Worker always counts streamed bytes and cancels on actual overflow. It reconstructs the Request from only the bounded bytes. GET, HEAD, and other bodyless endpoint behavior remains unchanged.
+
 ## Initial pCloud authentication model
 
 For the first release, every user registers their own pCloud application and stores their own pCloud credentials in their own Cloudflare environment.
@@ -152,7 +156,9 @@ Search file/folder metadata under a virtual path. The initial implementation is 
 - optional folder matches
 - bounded returned result count
 
-pCloud's documented API does not expose a dedicated general filename search method. The initial implementation therefore uses `listfolder` with recursive listing and searches the returned metadata tree in the Worker.
+pCloud's documented API does not expose a dedicated general filename search method. The implementation therefore calls `listfolder` without recursive mode for one folder at a time and traverses the tree iteratively in the Worker. Traversal is path-based: response-derived folder names are validated and joined beneath the already-resolved physical and virtual parent paths. Response-derived or caller-supplied folder IDs are not used, so traversal cannot bypass the configured virtual root through an ID.
+
+Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, and defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any response or traversal bound while work remains returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
 
 This is **not** full-text content search.
 
@@ -160,7 +166,7 @@ Possible future evolution:
 
 - cached metadata index
 - Cloudflare KV / D1 backed index
-- incremental updates using pCloud change information
+- incremental indexing or cache refresh using the pCloud `diff` API for large trees
 - full-text indexing for supported document formats
 
 ### `get_file_info`
@@ -176,7 +182,7 @@ Retrieve a supported text file by virtual path while applying the same virtual-r
 - allows text MIME types and a conservative extension fallback for generic MIME types
 - obtains a temporary content request through `getfilelink` and accepts only HTTPS content hosts matching `*.pcloud.com`
 - fetches raw bytes without following redirects, enforces the byte limit while receiving them, and decodes them strictly as UTF-8
-- rejects folders, binary formats, unsupported types, non-UTF-8 text, oversized files, and partial reads; support for additional text encodings may be added later
+- requires the downloaded byte length to exactly match metadata, then rejects folders, binary formats, unsupported types, non-UTF-8 text, oversized files, and partial or inconsistent reads; support for additional text encodings may be added later
 - does not expose physical paths, temporary download URLs, or caller-supplied file-ID access
 
 ### `get_image_content`
@@ -210,7 +216,7 @@ Implementation must account for pCloud's API/OAuth behavior, including regional 
 
 The pCloud root folder has folder ID `0`, but scoped deployments intentionally avoid treating that physical root as the MCP root.
 
-pCloud supports recursive `listfolder`; recursive results contain nested folder `contents`. Recursive metadata may omit full paths, so the MCP reconstructs virtual paths from folder names while walking the tree.
+`search_files` deliberately avoids pCloud recursive `listfolder` responses. A production diagnostic measured an unfiltered recursive whole-tree response at more than 32 MiB, so that strategy is unsuitable for the bounded v0.1 search path. The Worker instead reconstructs paths from validated names while requesting each folder non-recursively, keeping every JSON response independently bounded and reapplying the scoped parent path at each step.
 
 pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
@@ -230,6 +236,7 @@ Characteristics:
 - deployment-specific non-secret configuration stored in Worker environment variables
 - minimal dependencies
 - no dedicated VPS / home server requirement
+- preview URLs explicitly disabled while the normal production `workers.dev` route remains available for Access protection
 
 `keep_vars` is enabled in Wrangler so self-hosters can configure deployment-specific variables in the Cloudflare dashboard without having those values removed by subsequent GitHub/Wrangler deployments.
 
@@ -345,6 +352,15 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - document third-party self-hosting, security reporting, and release boundaries
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending final external review
+
+#### Phase 8.4 — external audit remediation — implementation and production integration complete, independent re-audit pending
+
+- fail closed on pCloud API redirects and bound pCloud JSON responses
+- enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
+- make folder-by-folder metadata search iterative and bounded, and require exact text metadata/body size consistency
+- validate the default 45-call search bound in production: complete bounded subtrees succeed, while larger trees fail explicitly without partial results before an opaque platform subrequest failure
+- disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
+- retain the existing embedded Office resource transport without adding standalone resource APIs
 
 ### Later
 

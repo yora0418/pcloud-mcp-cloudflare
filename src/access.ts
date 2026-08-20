@@ -5,6 +5,12 @@ type CloudflareAccessEnv = {
   POLICY_AUD?: string;
 };
 
+export type CloudflareAccessPrincipal = {
+  rateLimitKey: string;
+};
+
+const SHARED_VERIFIED_PRINCIPAL_KEY = "verified:shared";
+
 const CLOUDFLARE_ACCESS_HOST_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
 
@@ -64,30 +70,45 @@ function getJwks(teamDomain: string) {
 export async function verifyCloudflareAccess(
   request: Request,
   env: CloudflareAccessEnv,
-): Promise<boolean> {
+): Promise<CloudflareAccessPrincipal | undefined> {
   if (!env.TEAM_DOMAIN || !env.POLICY_AUD) {
     console.error(
       `Cloudflare Access validation is not configured. TEAM_DOMAIN=${Boolean(env.TEAM_DOMAIN)} POLICY_AUD=${Boolean(env.POLICY_AUD)}`,
     );
-    return false;
+    return undefined;
   }
 
   const token = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!token) {
     console.warn("Cloudflare Access JWT header is missing.");
-    return false;
+    return undefined;
   }
 
   try {
     const teamDomain = normalizeTeamDomain(env.TEAM_DOMAIN);
-    await jwtVerify(token, getJwks(teamDomain), {
+    const { payload } = await jwtVerify(token, getJwks(teamDomain), {
       algorithms: ["RS256"],
       issuer: teamDomain,
       audience: env.POLICY_AUD,
     });
-    return true;
+
+    const subject =
+      typeof payload.sub === "string" ? payload.sub.trim() : "";
+    if (subject) {
+      return { rateLimitKey: `sub:${subject}` };
+    }
+
+    const commonName =
+      typeof payload.common_name === "string"
+        ? payload.common_name.trim()
+        : "";
+    return {
+      rateLimitKey: commonName
+        ? `common_name:${commonName}`
+        : SHARED_VERIFIED_PRINCIPAL_KEY,
+    };
   } catch {
     console.warn("Cloudflare Access JWT verification failed.");
-    return false;
+    return undefined;
   }
 }
