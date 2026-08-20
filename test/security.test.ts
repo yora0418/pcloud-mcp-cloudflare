@@ -7,7 +7,10 @@ import {
   MCP_REQUEST_MAX_BYTES,
   McpRequestBodyError,
 } from "../src/mcp-request-guards.ts";
-import { normalizePCloudApiHost } from "../src/pcloud-config.ts";
+import {
+  getPCloudSearchMaxFolderCalls,
+  normalizePCloudApiHost,
+} from "../src/pcloud-config.ts";
 import {
   optionalPCloudId,
   optionalPCloudSize,
@@ -104,6 +107,32 @@ test("PCLOUD_API_HOST accepts only canonical regional API hosts", () => {
     "https://api.pcloud.com.example",
   ]) {
     assert.throws(() => normalizePCloudApiHost(value), /PCLOUD_API_HOST/);
+  }
+});
+
+test("search folder-call configuration is canonical and bounded", () => {
+  assert.equal(getPCloudSearchMaxFolderCalls(undefined), 45);
+  assert.equal(getPCloudSearchMaxFolderCalls("1"), 1);
+  assert.equal(getPCloudSearchMaxFolderCalls("73"), 73);
+  assert.equal(getPCloudSearchMaxFolderCalls("1024"), 1_024);
+
+  for (const value of [
+    "",
+    "0",
+    "01",
+    "+1",
+    " 1",
+    "1 ",
+    "1.0",
+    "1e2",
+    "1025",
+    "9999",
+    "9007199254740993",
+  ]) {
+    assert.throws(
+      () => getPCloudSearchMaxFolderCalls(value),
+      /PCLOUD_SEARCH_MAX_FOLDER_CALLS/,
+    );
   }
 });
 

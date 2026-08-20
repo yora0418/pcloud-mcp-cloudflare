@@ -8,7 +8,10 @@ import {
   McpRequestBodyError,
   type RateLimitBinding,
 } from "./mcp-request-guards";
-import { normalizePCloudApiHost } from "./pcloud-config";
+import {
+  getPCloudSearchMaxFolderCalls,
+  normalizePCloudApiHost,
+} from "./pcloud-config";
 import {
   optionalPCloudId,
   optionalPCloudSize,
@@ -25,6 +28,7 @@ type Env = McpBaseEnv & {
   PCLOUD_ACCESS_TOKEN?: string;
   PCLOUD_API_HOST?: string;
   PCLOUD_ROOT_PATH?: string;
+  PCLOUD_SEARCH_MAX_FOLDER_CALLS?: string;
   MCP_RATE_LIMITER?: RateLimitBinding;
 };
 
@@ -61,7 +65,6 @@ const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const PCLOUD_GETFILELINK_JSON_MAX_BYTES = 64 * 1024;
 const SEARCH_MAX_SCANNED_ENTRIES = 10_000;
 const SEARCH_MAX_DEPTH = 64;
-const SEARCH_MAX_FOLDER_API_CALLS = 1_024;
 const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
 const LOCAL_READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -1194,6 +1197,9 @@ function createServer(env: Env) {
         }
 
         const resolved = resolveVirtualPath(env, path);
+        const maxFolderApiCalls = getPCloudSearchMaxFolderCalls(
+          env.PCLOUD_SEARCH_MAX_FOLDER_CALLS,
+        );
         const lowerNeedle = needle.toLocaleLowerCase();
         const returnFolders = includeFolders ?? true;
         const limit = maxResults ?? 50;
@@ -1217,9 +1223,9 @@ function createServer(env: Env) {
         let nextFolderIndex = 0;
 
         while (nextFolderIndex < pendingFolders.length) {
-          if (folderApiCalls >= SEARCH_MAX_FOLDER_API_CALLS) {
+          if (folderApiCalls >= maxFolderApiCalls) {
             throw new Error(
-              `Search exceeded the ${SEARCH_MAX_FOLDER_API_CALLS}-folder/API-call safety limit; no complete search result was returned.`,
+              `Search reached the ${maxFolderApiCalls}-folder/API-call safety limit while folders remained; no complete search result was returned. Retry with a narrower path. Increasing PCLOUD_SEARCH_MAX_FOLDER_CALLS requires a Cloudflare Workers plan with sufficient external subrequest allowance.`,
             );
           }
 
@@ -1292,7 +1298,7 @@ function createServer(env: Env) {
           safetyLimits: {
             maxScannedEntries: SEARCH_MAX_SCANNED_ENTRIES,
             maxDepth: SEARCH_MAX_DEPTH,
-            maxFolderApiCalls: SEARCH_MAX_FOLDER_API_CALLS,
+            maxFolderApiCalls,
           },
           searchType: "metadata-name-and-path-substring",
         };

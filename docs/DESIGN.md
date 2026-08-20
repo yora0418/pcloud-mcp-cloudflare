@@ -158,7 +158,7 @@ Search file/folder metadata under a virtual path. The initial implementation is 
 
 pCloud's documented API does not expose a dedicated general filename search method. The implementation therefore calls `listfolder` without recursive mode for one folder at a time and traverses the tree iteratively in the Worker. Traversal is path-based: response-derived folder names are validated and joined beneath the already-resolved physical and virtual parent paths. Response-derived or caller-supplied folder IDs are not used, so traversal cannot bypass the configured virtual root through an ID.
 
-Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, and performs at most 1,024 folder/API calls. The call limit accommodates moderately large trees while remaining well below the Workers Paid subrequest ceiling; Cloudflare Free has a lower platform subrequest limit and therefore supports only smaller trees. Exceeding any response or traversal bound returns an explicit error without partial search results. Malformed JSON and JSON size overflow are reported separately without exposing response content.
+Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, and defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any response or traversal bound while work remains returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
 
 This is **not** full-text content search.
 
@@ -166,7 +166,7 @@ Possible future evolution:
 
 - cached metadata index
 - Cloudflare KV / D1 backed index
-- incremental updates using pCloud change information
+- incremental indexing or cache refresh using the pCloud `diff` API for large trees
 - full-text indexing for supported document formats
 
 ### `get_file_info`

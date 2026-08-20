@@ -15,7 +15,7 @@ const CONTENT_HOST = "content.pcloud.com";
 const CONTENT_PATH = "/temporary/mock-content";
 const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
-const SEARCH_MAX_FOLDER_API_CALLS = 1_024;
+const SEARCH_DEFAULT_MAX_FOLDER_API_CALLS = 45;
 
 let worker;
 let bundleDirectory;
@@ -362,8 +362,12 @@ async function rpc(method, params, overrides = {}, token = accessJwt) {
   return JSON.parse(responseText);
 }
 
-async function callTool(name, args) {
-  const response = await rpc("tools/call", { name, arguments: args });
+async function callTool(name, args, overrides = {}) {
+  const response = await rpc(
+    "tools/call",
+    { name, arguments: args },
+    overrides,
+  );
   assert.equal(response.error, undefined, JSON.stringify(response.error));
   return response.result;
 }
@@ -793,7 +797,7 @@ test("search uses non-recursive folder listings and completes traversal after ma
   assert.deepEqual(result.safetyLimits, {
     maxScannedEntries: 10_000,
     maxDepth: 64,
-    maxFolderApiCalls: SEARCH_MAX_FOLDER_API_CALLS,
+    maxFolderApiCalls: SEARCH_DEFAULT_MAX_FOLDER_API_CALLS,
   });
   assert.equal(
     fetchCalls
@@ -861,17 +865,21 @@ test("search rejects scanned-entry and depth overflow without partial results", 
     parentPath = `${parentPath}/${name}`;
   }
   setScenario({ listMetadataByPath });
-  errorResult = await callTool("search_files", {
-    query: "level",
-    path: "/",
-  });
+  errorResult = await callTool(
+    "search_files",
+    {
+      query: "level",
+      path: "/",
+    },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1024" },
+  );
   assert.equal(errorResult.isError, true);
   assert.match(errorResult.content[0].text, /64-level nesting safety limit/);
   assert.match(errorResult.content[0].text, /no complete search result/);
   assert.equal(pCloudCallCount("/listfolder"), 65);
 });
 
-test("search enforces its folder API-call limit", async () => {
+test("search defaults to 45 folder calls and rejects incomplete traversal explicitly", async () => {
   setScenario({
     listResponseFactory: ({ requestedPath }) =>
       jsonResponse({
@@ -881,7 +889,7 @@ test("search enforces its folder API-call limit", async () => {
           contents:
             requestedPath === ROOT_PATH
               ? Array.from(
-                  { length: SEARCH_MAX_FOLDER_API_CALLS },
+                  { length: SEARCH_DEFAULT_MAX_FOLDER_API_CALLS },
                   (_, index) => ({
                     isfolder: true,
                     name: `folder-${index}`,
@@ -896,9 +904,81 @@ test("search enforces its folder API-call limit", async () => {
     path: "/",
   });
   assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /1024-folder\/API-call safety limit/);
+  assert.match(result.content[0].text, /45-folder\/API-call safety limit/);
   assert.match(result.content[0].text, /no complete search result/);
-  assert.equal(pCloudCallCount("/listfolder"), SEARCH_MAX_FOLDER_API_CALLS);
+  assert.match(result.content[0].text, /narrower path/);
+  assert.match(
+    result.content[0].text,
+    /plan with sufficient external subrequest allowance/,
+  );
+  assert.equal(
+    pCloudCallCount("/listfolder"),
+    SEARCH_DEFAULT_MAX_FOLDER_API_CALLS,
+  );
+});
+
+test("search honors configured folder-call limits and succeeds exactly at the limit", async () => {
+  setScenario({
+    listMetadataByPath: {
+      [ROOT_PATH]: {
+        isfolder: true,
+        contents: [{ isfolder: true, name: "Folder" }],
+      },
+      [`${ROOT_PATH}/Folder`]: {
+        isfolder: true,
+        contents: [{ isfolder: false, name: "match.txt", size: 1 }],
+      },
+    },
+  });
+
+  let result = parseToolText(
+    await callTool(
+      "search_files",
+      { query: "match", path: "/" },
+      { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "2" },
+    ),
+  );
+  assert.equal(result.folderApiCalls, 2);
+  assert.equal(result.scannedEntries, 2);
+  assert.equal(result.totalMatches, 1);
+  assert.equal(result.safetyLimits.maxFolderApiCalls, 2);
+  assert.equal(pCloudCallCount("/listfolder"), 2);
+
+  setScenario({
+    listMetadataByPath: {
+      [ROOT_PATH]: {
+        isfolder: true,
+        contents: [{ isfolder: true, name: "Folder" }],
+      },
+      [`${ROOT_PATH}/Folder`]: { isfolder: true, contents: [] },
+    },
+  });
+  result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1" },
+  );
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /1-folder\/API-call safety limit/);
+  assert.match(result.content[0].text, /no complete search result/);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+});
+
+test("search fails closed on malformed folder-call configuration", async () => {
+  setScenario({
+    listMetadata: { isfolder: true, contents: [] },
+  });
+  const result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "045" },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "PCLOUD_SEARCH_MAX_FOLDER_CALLS must be a canonical integer from 1 to 1024.",
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 0);
 });
 
 test("search distinguishes a folder JSON overflow and propagates traversal API errors", async () => {

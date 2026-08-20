@@ -3,6 +3,32 @@ const ALLOWED_PCLOUD_API_HOSTS = new Set([
   "eapi.pcloud.com",
 ]);
 
+const DEFAULT_PCLOUD_SEARCH_MAX_FOLDER_CALLS = 45;
+const HARD_PCLOUD_SEARCH_MAX_FOLDER_CALLS = 1_024;
+
+export function getPCloudSearchMaxFolderCalls(
+  value: string | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_PCLOUD_SEARCH_MAX_FOLDER_CALLS;
+  }
+
+  if (!/^[1-9][0-9]{0,3}$/.test(value)) {
+    throw new Error(
+      "PCLOUD_SEARCH_MAX_FOLDER_CALLS must be a canonical integer from 1 to 1024.",
+    );
+  }
+
+  const parsed = Number(value);
+  if (parsed > HARD_PCLOUD_SEARCH_MAX_FOLDER_CALLS) {
+    throw new Error(
+      "PCLOUD_SEARCH_MAX_FOLDER_CALLS must be a canonical integer from 1 to 1024.",
+    );
+  }
+
+  return parsed;
+}
+
 export function normalizePCloudApiHost(value: string): string {
   const raw = value.trim();
   let url: URL;

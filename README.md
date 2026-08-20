@@ -43,6 +43,7 @@ Runtime configuration includes:
 - `POLICY_AUD` — Cloudflare Access Application Audience tag
 - `PCLOUD_API_HOST` — `api.pcloud.com` for US accounts or `eapi.pcloud.com` for EU accounts
 - `PCLOUD_ROOT_PATH` — optional physical pCloud folder exposed as MCP `/`, for example `/Sync`
+- `PCLOUD_SEARCH_MAX_FOLDER_CALLS` — optional complete-search folder-listing limit; defaults to `45` and may be raised to at most `1024`
 
 Secret configuration:
 
@@ -75,7 +76,7 @@ Read-only access prevents the MCP from modifying pCloud files, but it does not p
 
 It does **not** search inside file contents.
 
-Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, and 1,024 folder/API calls. If a safety limit is reached, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Because every folder requires an outbound pCloud request, large trees may also require a Cloudflare plan whose per-request subrequest allowance is above the Free plan limit.
+Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, and by default 45 folder listings. If a safety limit is reached while folders remain, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
 
 ## File metadata, text reading, image content, and Office content
 
