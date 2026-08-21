@@ -825,6 +825,80 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
     "/Scoped /Documents/report.md ",
   );
 
+  const textBytes = new TextEncoder().encode("hello");
+  setScenario({
+    virtualPath: "/ Text / note.md ",
+    bytes: textBytes,
+    metadata: {
+      isfolder: false,
+      name: " note.md ",
+      size: textBytes.byteLength,
+      contenttype: "text/markdown",
+    },
+  });
+  const text = parseToolText(
+    await callTool("read_file", {
+      path: scenario.virtualPath,
+      maxBytes: textBytes.byteLength,
+    }),
+  );
+  assert.equal(text.path, "/ Text / note.md ");
+  assert.equal(text.content, "hello");
+  const readStatRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
+  assert.equal(
+    readStatRequest.url.searchParams.get("path"),
+    `${ROOT_PATH}/ Text / note.md `,
+  );
+
+  const png = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  ]);
+  setScenario({
+    virtualPath: "/ Images / sample.png",
+    bytes: png,
+    metadata: {
+      isfolder: false,
+      name: " sample.png",
+      size: png.byteLength,
+      contenttype: "image/png",
+    },
+  });
+  const image = await callTool("get_image_content", {
+    path: scenario.virtualPath,
+  });
+  assert.equal(image.content[0].type, "image");
+  const imageStatRequest = fetchCalls.find(
+    ({ url }) => url.pathname === "/stat",
+  );
+  assert.equal(
+    imageStatRequest.url.searchParams.get("path"),
+    `${ROOT_PATH}/ Images / sample.png`,
+  );
+
+  const docx = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02]);
+  setScenario({
+    virtualPath: "/ Office / sample.docx",
+    bytes: docx,
+    metadata: {
+      isfolder: false,
+      name: " sample.docx",
+      size: docx.byteLength,
+      contenttype:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    },
+  });
+  const office = await callTool("get_office_content", {
+    path: scenario.virtualPath,
+  });
+  assert.equal(office.content[0].type, "resource");
+  const officeStatRequest = fetchCalls.find(
+    ({ url }) => url.pathname === "/stat",
+  );
+  assert.equal(
+    officeStatRequest.url.searchParams.get("path"),
+    `${ROOT_PATH}/ Office / sample.docx`,
+  );
+
   setScenario({
     listMetadataByPath: {
       [`${ROOT_PATH}/ Folder `]: {
@@ -857,6 +931,71 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
     const result = await callTool("get_file_info", { path: pathValue });
     assert.equal(result.isError, true);
     assert.equal(pCloudCallCount("/stat"), 0);
+  }
+});
+
+test("virtual path segments enforce the 1024-byte UTF-8 boundary", async () => {
+  const multibyteAccepted = `${"\u00e9".repeat(511)}a`;
+  const multibyteRejected = "\u00e9".repeat(512);
+  assert.equal(multibyteAccepted.length, 512);
+  assert.equal(multibyteRejected.length, 512);
+  assert.equal(new TextEncoder().encode(multibyteAccepted).byteLength, 1023);
+  assert.equal(new TextEncoder().encode(multibyteRejected).byteLength, 1024);
+
+  for (const segment of ["a".repeat(1023), multibyteAccepted]) {
+    assert.equal(new TextEncoder().encode(segment).byteLength, 1023);
+    const virtualPath = `/${segment}`;
+    setScenario({ virtualPath });
+    const info = parseToolText(
+      await callTool("get_file_info", { path: virtualPath }),
+    );
+    assert.equal(info.path, virtualPath);
+    assert.equal(pCloudCallCount("/stat"), 1);
+  }
+
+  for (const segment of ["a".repeat(1024), multibyteRejected]) {
+    assert.equal(new TextEncoder().encode(segment).byteLength, 1024);
+    setScenario();
+    const result = await callTool("get_file_info", { path: `/${segment}` });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /path segment that is too long/);
+    assert.equal(pCloudCallCount("/stat"), 0);
+  }
+});
+
+test("listfolder entry names enforce the 1024-byte UTF-8 boundary", async () => {
+  const multibyteAccepted = `${"\u00e9".repeat(511)}a`;
+  const multibyteRejected = "\u00e9".repeat(512);
+
+  for (const name of ["a".repeat(1023), multibyteAccepted]) {
+    assert.equal(new TextEncoder().encode(name).byteLength, 1023);
+    setScenario({
+      listMetadata: {
+        isfolder: true,
+        contents: [{ isfolder: false, name, size: 1 }],
+      },
+    });
+    const listing = parseToolText(
+      await callTool("list_folder", { path: "/" }),
+    );
+    assert.equal(listing.entries[0].name, name);
+    assert.equal(listing.entries[0].path, `/${name}`);
+  }
+
+  for (const name of ["a".repeat(1024), multibyteRejected]) {
+    assert.equal(new TextEncoder().encode(name).byteLength, 1024);
+    setScenario({
+      listMetadata: {
+        isfolder: true,
+        contents: [{ isfolder: false, name, size: 1 }],
+      },
+    });
+    const result = await callTool("list_folder", { path: "/" });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud listfolder returned an invalid entry name.",
+    );
   }
 });
 

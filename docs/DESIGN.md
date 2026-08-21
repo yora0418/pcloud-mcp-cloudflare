@@ -262,7 +262,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. A subsequent independent audit identified release-blocking pCloud response and path-validation issues. Remediation is implemented on a review branch, but production integration validation and repeat independent review remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
+The repository remains private and publication is on hold. A subsequent independent audit identified release-blocking pCloud response and path-validation issues. Remediation is implemented, but production integration validation and repeat independent review remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
 
 ## License
 
