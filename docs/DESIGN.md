@@ -257,7 +257,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private while the v0.1 release candidate undergoes final external review. Publication, tagging, and the first GitHub Release are separate release steps.
+The repository remains private while the v0.1 release candidate awaits explicit final release approval. The independent external re-audit and Git history / secret review passed with no release blockers identified. Publication, tagging, and the first GitHub Release are separate release steps.
 
 ## License
 
@@ -351,9 +351,9 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - track the npm lockfile for reproducible clean installs without publishing an npm package
 - document third-party self-hosting, security reporting, and release boundaries
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
-- keep repository publication, tags, and GitHub Releases pending final external review
+- keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — implementation and production integration complete, independent re-audit pending
+#### Phase 8.4 — external audit remediation — complete
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -361,6 +361,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - validate the default 45-call search bound in production: complete bounded subtrees succeed, while larger trees fail explicitly without partial results before an opaque platform subrequest failure
 - disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
 - retain the existing embedded Office resource transport without adding standalone resource APIs
+- complete the independent external re-audit and Git history / secret review with no release blockers identified
 
 ### Later
 
