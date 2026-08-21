@@ -37,8 +37,14 @@ type PCloudMetadata = Record<string, unknown> & {
 };
 
 type PCloudJsonResponse = {
-  result?: number | string;
+  result: number;
   metadata?: PCloudMetadata;
+};
+
+type PCloudFolderEntry = {
+  metadata: Record<string, unknown>;
+  name: string;
+  isFolder: boolean;
 };
 
 class PCloudApiError extends Error {
@@ -185,7 +191,11 @@ const TEXT_FILE_EXTENSIONS = new Set([
 ]);
 
 function normalizeAbsolutePath(value: string, label: string): string {
-  const path = value.trim();
+  const path = value;
+
+  if (path.length === 0) {
+    throw new Error(`${label} must not be empty.`);
+  }
 
   if (!path.startsWith("/")) {
     throw new Error(`${label} must start with /.`);
@@ -199,9 +209,21 @@ function normalizeAbsolutePath(value: string, label: string): string {
     throw new Error(`${label} must not contain empty path segments.`);
   }
 
-  const segments = path.split("/").slice(1);
+  if (path.includes("\\") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
+    throw new Error(`${label} contains an unsupported path character.`);
+  }
+
+  const segments = path === "/" ? [] : path.split("/").slice(1);
   if (segments.some((segment) => segment === "." || segment === "..")) {
     throw new Error(`${label} must not contain . or .. path segments.`);
+  }
+
+  if (
+    segments.some(
+      (segment) => new TextEncoder().encode(segment).byteLength >= 1024,
+    )
+  ) {
+    throw new Error(`${label} contains a path segment that is too long.`);
   }
 
   return path;
@@ -215,7 +237,7 @@ function getPCloudConfig(env: Env) {
   }
 
   const rootPath = normalizeAbsolutePath(
-    env.PCLOUD_ROOT_PATH?.trim() || "/",
+    env.PCLOUD_ROOT_PATH === undefined ? "/" : env.PCLOUD_ROOT_PATH,
     "PCLOUD_ROOT_PATH",
   );
 
@@ -227,7 +249,10 @@ function getPCloudConfig(env: Env) {
 }
 
 function normalizeVirtualPath(value?: string): string {
-  return normalizeAbsolutePath(value?.trim() || "/", "Virtual pCloud path");
+  return normalizeAbsolutePath(
+    value === undefined ? "/" : value,
+    "Virtual pCloud path",
+  );
 }
 
 function resolveVirtualPath(env: Env, value?: string): {
@@ -492,14 +517,11 @@ async function callPCloudJson(
     throw new Error("pCloud returned an invalid JSON response.");
   }
 
+  const result = parsePCloudResultCode(rawData.result);
   const data: PCloudJsonResponse = {
-    result:
-      typeof rawData.result === "number" || typeof rawData.result === "string"
-        ? rawData.result
-        : undefined,
+    result,
     metadata: isRecord(rawData.metadata) ? rawData.metadata : undefined,
   };
-  const result = parsePCloudResultCode(data.result ?? 0);
 
   if (result !== 0) {
     throw new PCloudApiError(String(result));
@@ -510,13 +532,6 @@ async function callPCloudJson(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getMetadataContents(
-  metadata: Record<string, unknown>,
-): Array<Record<string, unknown>> {
-  const contents = metadata.contents;
-  return Array.isArray(contents) ? contents.filter(isRecord) : [];
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -880,34 +895,42 @@ async function readResponseBytesWithinLimit(
   return bytes;
 }
 
-function getSearchFolderContents(
+function getPCloudFolderContents(
   metadata: Record<string, unknown> | undefined,
-): Array<Record<string, unknown>> {
-  if (!metadata || !Array.isArray(metadata.contents)) {
-    throw new Error("pCloud listfolder returned invalid folder metadata.");
-  }
-
-  if (!metadata.contents.every(isRecord)) {
-    throw new Error("pCloud listfolder returned invalid folder metadata.");
-  }
-
-  return metadata.contents;
-}
-
-function getSearchEntryName(entry: Record<string, unknown>): string {
-  const name = entry.name;
+): PCloudFolderEntry[] {
   if (
-    typeof name !== "string" ||
-    name.length === 0 ||
-    name === "." ||
-    name === ".." ||
-    name.includes("/") ||
-    /[\u0000-\u001f\u007f]/.test(name)
+    !metadata ||
+    metadata.isfolder !== true ||
+    !Array.isArray(metadata.contents)
   ) {
-    throw new Error("pCloud listfolder returned an invalid entry name.");
+    throw new Error("pCloud listfolder returned invalid folder metadata.");
   }
 
-  return name;
+  return metadata.contents.map((entry): PCloudFolderEntry => {
+    if (!isRecord(entry) || typeof entry.isfolder !== "boolean") {
+      throw new Error("pCloud listfolder returned invalid entry metadata.");
+    }
+
+    const name = entry.name;
+    if (
+      typeof name !== "string" ||
+      name.length === 0 ||
+      name === "." ||
+      name === ".." ||
+      name.includes("/") ||
+      name.includes("\\") ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(name) ||
+      new TextEncoder().encode(name).byteLength >= 1024
+    ) {
+      throw new Error("pCloud listfolder returned an invalid entry name.");
+    }
+
+    return {
+      metadata: entry,
+      name,
+      isFolder: entry.isfolder,
+    };
+  });
 }
 
 async function parseBoundedPCloudJson(
@@ -990,29 +1013,27 @@ async function readPCloudText(
 }
 
 function compactPCloudEntry(
-  entry: Record<string, unknown>,
+  entry: PCloudFolderEntry,
   virtualPath?: string,
 ) {
-  const isFolder = entry.isfolder === true;
+  const { metadata, name, isFolder } = entry;
 
   return {
     type: isFolder ? "folder" : "file",
-    name: typeof entry.name === "string" ? entry.name : undefined,
-    path:
-      virtualPath ??
-      (typeof entry.path === "string" ? entry.path : undefined),
+    name,
+    path: virtualPath,
     folderId: isFolder
-      ? optionalPCloudId(entry.folderid, entry.id, "d")
+      ? optionalPCloudId(metadata.folderid, metadata.id, "d")
       : undefined,
     fileId: !isFolder
-      ? optionalPCloudId(entry.fileid, entry.id, "f")
+      ? optionalPCloudId(metadata.fileid, metadata.id, "f")
       : undefined,
-    size: !isFolder ? optionalPCloudSize(entry.size) : undefined,
+    size: !isFolder ? optionalPCloudSize(metadata.size) : undefined,
     modified:
-      typeof entry.modified === "string" ? entry.modified : undefined,
+      typeof metadata.modified === "string" ? metadata.modified : undefined,
     contentType:
-      !isFolder && typeof entry.contenttype === "string"
-        ? entry.contenttype
+      !isFolder && typeof metadata.contenttype === "string"
+        ? metadata.contenttype
         : undefined,
   };
 }
@@ -1060,6 +1081,7 @@ function createServer(env: Env) {
           ),
         path: z
           .string()
+          .min(1)
           .optional()
           .describe(
             "Virtual absolute folder path such as /Documents. Defaults to /. Paths cannot escape the configured virtual root.",
@@ -1075,12 +1097,12 @@ function createServer(env: Env) {
     },
     async ({ folderId, path, maxEntries }) => {
       try {
-        if (folderId && path) {
+        if (folderId !== undefined && path !== undefined) {
           throw new Error("Specify either folderId or path, not both.");
         }
 
         const { rootPath } = getPCloudConfig(env);
-        if (folderId && rootPath !== "/") {
+        if (folderId !== undefined && rootPath !== "/") {
           throw new Error(
             "folderId access is disabled because PCLOUD_ROOT_PATH scopes this MCP to a virtual root. Use a virtual path instead.",
           );
@@ -1089,7 +1111,7 @@ function createServer(env: Env) {
         let params: Record<string, string>;
         let requestedVirtualPath: string | undefined;
 
-        if (folderId) {
+        if (folderId !== undefined) {
           params = { folderid: folderId };
         } else {
           const resolved = resolveVirtualPath(env, path);
@@ -1098,34 +1120,32 @@ function createServer(env: Env) {
         }
 
         const data = await callPCloudJson(env, "listfolder", params);
-        const folder = data.metadata ?? {};
-        const contents = getMetadataContents(folder);
+        const folder = data.metadata;
+        const contents = getPCloudFolderContents(folder);
         const limit = maxEntries ?? 200;
 
         const entries = contents.slice(0, limit).map((entry) => {
-          const name = typeof entry.name === "string" ? entry.name : undefined;
           const virtualEntryPath =
-            requestedVirtualPath && name
-              ? joinVirtualPath(requestedVirtualPath, name)
+            requestedVirtualPath !== undefined
+              ? joinVirtualPath(requestedVirtualPath, entry.name)
               : undefined;
 
           return compactPCloudEntry(entry, virtualEntryPath);
         });
 
-        const folderPath =
-          requestedVirtualPath ??
-          (typeof folder.path === "string" ? folder.path : undefined);
+        const folderPath = requestedVirtualPath;
+        const folderName =
+          folderPath === "/"
+            ? "/"
+            : folderPath !== undefined
+              ? folderPath.slice(folderPath.lastIndexOf("/") + 1)
+              : undefined;
 
         const result = {
           folder: {
-            name:
-              folderPath === "/"
-                ? "/"
-                : typeof folder.name === "string"
-                  ? folder.name
-                  : undefined,
+            name: folderName,
             path: folderPath,
-            folderId: optionalPCloudId(folder.folderid, folder.id, "d"),
+            folderId: optionalPCloudId(folder?.folderid, folder?.id, "d"),
           },
           entries,
           totalEntries: contents.length,
@@ -1172,6 +1192,7 @@ function createServer(env: Env) {
           .describe("Substring to search for in names and relative virtual paths."),
         path: z
           .string()
+          .min(1)
           .optional()
           .describe(
             "Virtual folder path to search within. Defaults to /. The search cannot leave the configured virtual root.",
@@ -1235,7 +1256,7 @@ function createServer(env: Env) {
           const data = await callPCloudJson(env, "listfolder", {
             path: folder.physicalPath,
           });
-          const entries = getSearchFolderContents(data.metadata);
+          const entries = getPCloudFolderContents(data.metadata);
 
           for (const entry of entries) {
             scannedEntries += 1;
@@ -1252,19 +1273,12 @@ function createServer(env: Env) {
               );
             }
 
-            const name = getSearchEntryName(entry);
-            if (typeof entry.isfolder !== "boolean") {
-              throw new Error(
-                "pCloud listfolder returned invalid entry metadata.",
-              );
-            }
-
+            const { name, isFolder } = entry;
             const virtualPath = joinVirtualPath(folder.virtualPath, name);
             const relativePath = relativeSearchPath(
               resolved.virtualPath,
               virtualPath,
             );
-            const isFolder = entry.isfolder;
             const searchable = `${name}\n${relativePath}`.toLocaleLowerCase();
             const matchesQuery = searchable.includes(lowerNeedle);
 
@@ -1337,7 +1351,6 @@ function createServer(env: Env) {
       inputSchema: {
         path: z
           .string()
-          .trim()
           .min(1)
           .describe(
             "Required virtual absolute file path such as /Documents/example.md. File IDs are not accepted.",
@@ -1386,7 +1399,6 @@ function createServer(env: Env) {
       inputSchema: {
         path: z
           .string()
-          .trim()
           .min(1)
           .describe(
             "Required virtual absolute PNG or JPEG path. File IDs are not accepted.",
@@ -1480,7 +1492,6 @@ function createServer(env: Env) {
       inputSchema: {
         path: z
           .string()
-          .trim()
           .min(1)
           .describe(
             "Required virtual absolute file path such as /Documents/example.md. File IDs are not accepted.",
@@ -1578,7 +1589,6 @@ function createServer(env: Env) {
       inputSchema: {
         path: z
           .string()
-          .trim()
           .min(1)
           .describe(
             "Required virtual absolute DOCX, XLSX, or PPTX path. File IDs are not accepted.",

@@ -65,6 +65,7 @@ function streamingResponse(chunks, {
 
 function setScenario({
   virtualPath = "/Documents/note.md",
+  rootPath = ROOT_PATH,
   metadata,
   bytes = new TextEncoder().encode("hello"),
   listMetadata,
@@ -78,6 +79,7 @@ function setScenario({
 } = {}) {
   scenario = {
     virtualPath,
+    rootPath,
     metadata:
       metadata ??
       {
@@ -216,7 +218,10 @@ before(async () => {
       assert.equal(request.method, "GET");
       assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
-      assert.equal(url.searchParams.get("path"), `${ROOT_PATH}${scenario.virtualPath}`);
+      assert.equal(
+        url.searchParams.get("path"),
+        `${scenario.rootPath}${scenario.virtualPath}`,
+      );
       if (scenario.statResponseFactory) {
         return scenario.statResponseFactory();
       }
@@ -231,16 +236,25 @@ before(async () => {
       assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
       const requestedPath = url.searchParams.get("path");
-      assert.ok(
-        requestedPath === ROOT_PATH || requestedPath?.startsWith(`${ROOT_PATH}/`),
-      );
+      const requestedFolderId = url.searchParams.get("folderid");
+      if (requestedFolderId === null) {
+        assert.ok(
+          requestedPath === scenario.rootPath ||
+            requestedPath?.startsWith(`${scenario.rootPath}/`),
+        );
+      } else {
+        assert.equal(requestedPath, null);
+        assert.match(requestedFolderId, /^\d+$/);
+      }
       assert.equal(url.searchParams.get("recursive"), null);
       if (scenario.listResponseFactory) {
         return scenario.listResponseFactory({ request, requestedPath, url });
       }
       const metadata =
         scenario.listMetadataByPath?.[requestedPath] ??
-        (requestedPath === ROOT_PATH ? scenario.listMetadata : undefined);
+        (requestedPath === scenario.rootPath || requestedFolderId !== null
+          ? scenario.listMetadata
+          : undefined);
       return jsonResponse({ result: 0, metadata });
     }
 
@@ -252,7 +266,10 @@ before(async () => {
       assert.equal(url.search, "");
       assert.equal(request.redirect, "manual");
       const form = new URLSearchParams(await request.text());
-      assert.equal(form.get("path"), `${ROOT_PATH}${scenario.virtualPath}`);
+      assert.equal(
+        form.get("path"),
+        `${scenario.rootPath}${scenario.virtualPath}`,
+      );
       assert.equal(form.get("access_token"), ACCESS_TOKEN);
       if (scenario.getfilelinkResponseFactory) {
         return scenario.getfilelinkResponseFactory();
@@ -640,6 +657,207 @@ test("metadata tools never expose rounded 64-bit identifiers or sizes", async ()
   assert.equal(info.fileId, "9007199254740993");
   assert.equal("size" in info, false);
   assert.equal("hash" in info, false);
+});
+
+test("pCloud JSON calls require an explicit canonical result code", async () => {
+  const metadata = {
+    isfolder: false,
+    name: "note.md",
+    size: 5,
+    contenttype: "text/markdown",
+  };
+  const invalidResponses = [
+    { metadata },
+    { result: null, metadata },
+    { result: true, metadata },
+    { result: "00", metadata },
+    { result: -1, metadata },
+    { result: Number.MAX_SAFE_INTEGER + 1, metadata },
+  ];
+
+  for (const responseBody of invalidResponses) {
+    setScenario({
+      statResponseFactory: () => jsonResponse(responseBody),
+    });
+    const result = await callTool("get_file_info", {
+      path: scenario.virtualPath,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud returned an invalid result code.",
+    );
+    assert.equal(pCloudCallCount("/stat"), 1);
+  }
+});
+
+test("folder listings fail closed on malformed metadata or entries", async () => {
+  const invalidFolderMetadata = [
+    undefined,
+    {},
+    { isfolder: false, contents: [] },
+    { isfolder: true },
+    { isfolder: true, contents: {} },
+  ];
+
+  for (const metadata of invalidFolderMetadata) {
+    setScenario({
+      listResponseFactory: () => jsonResponse({ result: 0, metadata }),
+    });
+    const result = await callTool("list_folder", { path: "/" });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud listfolder returned invalid folder metadata.",
+    );
+  }
+
+  const invalidEntries = [
+    null,
+    { isfolder: "false", name: "file.txt" },
+    { isfolder: false },
+    { isfolder: false, name: ".." },
+    { isfolder: false, name: "bad/name.txt" },
+    { isfolder: false, name: "bad\\name.txt" },
+    { isfolder: false, name: "bad\u0001name.txt" },
+    { isfolder: false, name: "bad\u0085name.txt" },
+  ];
+
+  for (const invalidEntry of invalidEntries) {
+    setScenario({
+      listMetadata: {
+        isfolder: true,
+        contents: [
+          { isfolder: false, name: "valid.txt", size: 1 },
+          invalidEntry,
+        ],
+      },
+    });
+    const listResult = await callTool("list_folder", {
+      path: "/",
+      maxEntries: 1,
+    });
+    assert.equal(listResult.isError, true);
+    assert.ok(!JSON.stringify(listResult).includes("valid.txt"));
+
+    const searchResult = await callTool("search_files", {
+      query: "valid",
+      path: "/",
+    });
+    assert.equal(searchResult.isError, true);
+    assert.ok(!JSON.stringify(searchResult).includes("valid.txt"));
+  }
+});
+
+test("folder listing paths come only from validated virtual parents", async () => {
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      name: "Scoped",
+      path: "/private/physical/root",
+      contents: [
+        {
+          isfolder: false,
+          name: " report.txt ",
+          path: "/private/physical/root/report.txt",
+          size: 1,
+        },
+      ],
+    },
+  });
+  let listing = parseToolText(await callTool("list_folder", { path: "/" }));
+  assert.equal(listing.folder.path, "/");
+  assert.equal(listing.entries[0].name, " report.txt ");
+  assert.equal(listing.entries[0].path, "/ report.txt ");
+  assert.ok(!JSON.stringify(listing).includes("/private/physical/root"));
+  assert.ok(!JSON.stringify(listing).includes(ROOT_PATH));
+
+  setScenario({
+    rootPath: "/",
+    listMetadata: {
+      isfolder: true,
+      name: "Folder by ID",
+      path: "/private/physical/root",
+      contents: [
+        {
+          isfolder: false,
+          name: "entry.txt",
+          path: "/private/physical/root/entry.txt",
+          size: 1,
+        },
+      ],
+    },
+  });
+  listing = parseToolText(
+    await callTool(
+      "list_folder",
+      { folderId: "123" },
+      { PCLOUD_ROOT_PATH: "/" },
+    ),
+  );
+  assert.equal("path" in listing.folder, false);
+  assert.equal("path" in listing.entries[0], false);
+  assert.ok(!JSON.stringify(listing).includes("/private/physical/root"));
+});
+
+test("virtual paths preserve spaces exactly and reject unsupported inputs", async () => {
+  setScenario({
+    rootPath: "/Scoped ",
+    virtualPath: "/Documents/report.md ",
+    metadata: {
+      isfolder: false,
+      name: "report.md ",
+      size: 5,
+      contenttype: "text/markdown",
+    },
+  });
+  const info = parseToolText(
+    await callTool(
+      "get_file_info",
+      { path: scenario.virtualPath },
+      { PCLOUD_ROOT_PATH: scenario.rootPath },
+    ),
+  );
+  assert.equal(info.path, "/Documents/report.md ");
+  const statRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
+  assert.equal(
+    statRequest.url.searchParams.get("path"),
+    "/Scoped /Documents/report.md ",
+  );
+
+  setScenario({
+    listMetadataByPath: {
+      [`${ROOT_PATH}/ Folder `]: {
+        isfolder: true,
+        contents: [{ isfolder: false, name: " report.txt ", size: 1 }],
+      },
+    },
+  });
+  const search = parseToolText(
+    await callTool("search_files", {
+      query: "report",
+      path: "/ Folder ",
+    }),
+  );
+  assert.equal(search.searchPath, "/ Folder ");
+  assert.equal(search.matches[0].name, " report.txt ");
+  assert.equal(search.matches[0].path, "/ Folder / report.txt ");
+
+  const unsupportedPaths = [
+    "",
+    "   ",
+    "/Documents/../outside.txt",
+    "/Documents/./file.txt",
+    "/Documents/bad\\name.txt",
+    "/Documents/bad\u0001name.txt",
+    "/Documents/bad\u0085name.txt",
+  ];
+  for (const pathValue of unsupportedPaths) {
+    setScenario();
+    const result = await callTool("get_file_info", { path: pathValue });
+    assert.equal(result.isError, true);
+    assert.equal(pCloudCallCount("/stat"), 0);
+  }
 });
 
 test("Bearer-authenticated pCloud API redirects fail closed without a second fetch", async () => {

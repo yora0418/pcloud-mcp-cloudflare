@@ -77,7 +77,7 @@ Configure the following under the Worker's **Settings > Variables and Secrets**.
 | `PCLOUD_SEARCH_MAX_FOLDER_CALLS` | Variable | Optional canonical integer from `1` to `1024`; defaults to `45` complete-search folder listings |
 | `PCLOUD_ACCESS_TOKEN` | Secret | The pCloud OAuth access token |
 
-For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data the connected client may receive. Do not use `.` or `..` path segments. Read-only behavior prevents file mutation but does not prevent disclosure of readable content.
+For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data the connected client may receive. The value is used exactly as supplied, including spaces in filename segments; do not add formatting whitespace. Empty segments, `.` or `..` segments, backslashes, control characters, and overlong segments are rejected. Read-only behavior prevents file mutation but does not prevent disclosure of readable content.
 
 The default search limit leaves headroom below the Workers Free external-subrequest ceiling. Prefer narrower `search_files` paths for large trees. Increase `PCLOUD_SEARCH_MAX_FOLDER_CALLS` only when the selected Workers plan provides enough per-request external-subrequest allowance; malformed or out-of-range values make searches fail closed.
 

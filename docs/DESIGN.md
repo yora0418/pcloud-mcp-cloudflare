@@ -91,6 +91,8 @@ The Worker uses:
 - `PCLOUD_API_HOST` as deployment configuration (`api.pcloud.com` for US or `eapi.pcloud.com` for EU)
 - optional `PCLOUD_ROOT_PATH` as the physical pCloud folder exposed as the MCP-visible `/`
 
+Every pCloud JSON API response is read within its method-specific byte limit and must be a JSON object with an explicit canonical `result` code. Metadata is consumed only after `result` has been validated as zero; a missing or malformed result fails closed rather than being treated as success.
+
 ### Future possibility: shared OAuth application
 
 It may be possible to use a shared YoraLAB pCloud OAuth application so users would not need to register their own pCloud app.
@@ -127,7 +129,8 @@ This is a security and usability boundary, not merely a default folder.
 Rules:
 
 - all path-based tools resolve virtual paths beneath `PCLOUD_ROOT_PATH`
-- virtual paths must be absolute and cannot contain empty, `.` or `..` segments
+- virtual paths must be absolute and cannot contain empty, `.` or `..` segments, backslashes, control characters, or filename segments of 1,024 UTF-8 bytes or more
+- omitted optional paths default to `/`, but supplied path strings are never trimmed; leading and trailing spaces within filename segments remain significant
 - when `PCLOUD_ROOT_PATH` is a subfolder, direct `folderId` access is disabled in `list_folder` so an ID cannot bypass the scoped root
 - tool responses expose virtual paths rather than the physical root prefix
 - all current and future path-based tools use the same path-resolution boundary
@@ -145,6 +148,8 @@ Every tool advertises MCP annotations that describe it as read-only, non-destruc
 List entries in a folder. Paths are virtual paths relative to the configured MCP root.
 
 For scoped deployments, direct folder IDs are not accepted because they could bypass the virtual-root boundary.
+
+The Worker requires a successful `listfolder` response to contain folder metadata (`isfolder: true`) and a complete `contents` array. Every entry must be an object with a supported exact name and boolean folder marker; one malformed entry rejects the whole operation instead of producing a partial listing. Entry paths are reconstructed only from the already-validated virtual parent and exact entry name. The upstream physical `path` field is never used in tool output; when an unscoped caller lists by folder ID and no trusted virtual parent is available, folder and entry paths are omitted.
 
 ### `search_files`
 
@@ -257,7 +262,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private while the v0.1 release candidate awaits explicit final release approval. The independent external re-audit and Git history / secret review passed with no release blockers identified. Publication, tagging, and the first GitHub Release are separate release steps.
+The repository remains private and publication is on hold. A subsequent independent audit identified release-blocking pCloud response and path-validation issues. Remediation is implemented on a review branch, but production integration validation and repeat independent review remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
 
 ## License
 
@@ -353,7 +358,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — complete
+#### Phase 8.4 — external audit remediation — follow-up remediation implemented, validation pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -361,7 +366,9 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - validate the default 45-call search bound in production: complete bounded subtrees succeed, while larger trees fail explicitly without partial results before an opaque platform subrequest failure
 - disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
 - retain the existing embedded Office resource transport without adding standalone resource APIs
-- complete the independent external re-audit and Git history / secret review with no release blockers identified
+- complete the initial external remediation and production integration validation
+- after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
+- repeat production integration validation and independent review before release approval; the earlier Git history / secret review passed, but publication remains blocked until the follow-up findings are cleared
 
 ### Later
 
