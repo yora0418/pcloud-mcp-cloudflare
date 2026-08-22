@@ -190,6 +190,27 @@ const TEXT_FILE_EXTENSIONS = new Set([
   ".yml",
 ]);
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      if (index + 1 >= value.length) {
+        return true;
+      }
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (nextCodeUnit < 0xdc00 || nextCodeUnit > 0xdfff) {
+        return true;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function normalizeAbsolutePath(value: string, label: string): string {
   const path = value;
 
@@ -211,6 +232,10 @@ function normalizeAbsolutePath(value: string, label: string): string {
 
   if (path.includes("\\") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
     throw new Error(`${label} contains an unsupported path character.`);
+  }
+
+  if (hasUnpairedSurrogate(path)) {
+    throw new Error(`${label} contains an unsupported Unicode sequence.`);
   }
 
   const segments = path === "/" ? [] : path.split("/").slice(1);
@@ -353,6 +378,7 @@ function isNonEmptyStringArray(
 
 function normalizePCloudContentHost(value: string): string {
   if (
+    hasUnpairedSurrogate(value) ||
     value !== value.trim() ||
     !value ||
     /[\u0000-\u001f\u007f]/.test(value)
@@ -387,6 +413,7 @@ function normalizePCloudContentHost(value: string): string {
 
 function buildPCloudContentUrl(host: string, path: string): URL {
   if (
+    hasUnpairedSurrogate(path) ||
     !path.startsWith("/") ||
     path.startsWith("//") ||
     path.includes("\\") ||
@@ -920,6 +947,7 @@ function getPCloudFolderContents(
       name.includes("/") ||
       name.includes("\\") ||
       /[\u0000-\u001f\u007f-\u009f]/.test(name) ||
+      hasUnpairedSurrogate(name) ||
       new TextEncoder().encode(name).byteLength >= 1024
     ) {
       throw new Error("pCloud listfolder returned an invalid entry name.");

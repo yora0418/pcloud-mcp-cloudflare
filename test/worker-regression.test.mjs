@@ -969,6 +969,104 @@ test("virtual path segments enforce the 1024-byte UTF-8 boundary", async () => {
   }
 });
 
+test("unpaired surrogates fail closed across exact pCloud path boundaries", async () => {
+  for (const virtualPath of ["/\uD800", "/\uDC00", "/\uD800a", "/a\uDC00"]) {
+    setScenario();
+    const result = await callTool("get_file_info", { path: virtualPath });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /unsupported Unicode sequence/);
+    assert.equal(pCloudCallCount("/stat"), 0);
+  }
+
+  setScenario({ virtualPath: "/valid.txt" });
+  const invalidRoot = await callTool(
+    "get_file_info",
+    { path: scenario.virtualPath },
+    { PCLOUD_ROOT_PATH: "/Scoped\uD800" },
+  );
+  assert.equal(invalidRoot.isError, true);
+  assert.match(invalidRoot.content[0].text, /unsupported Unicode sequence/);
+  assert.equal(pCloudCallCount("/stat"), 0);
+
+  for (const name of ["folder\uD800", "folder\uDC00"]) {
+    setScenario({
+      listMetadata: {
+        isfolder: true,
+        contents: [{ isfolder: true, name }],
+      },
+    });
+    const result = await callTool("search_files", {
+      query: "folder",
+      path: "/",
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud listfolder returned an invalid entry name.",
+    );
+    assert.equal(pCloudCallCount("/listfolder"), 1);
+  }
+
+  for (const contentPath of ["/temporary/\uD800", "/temporary/\uDC00"]) {
+    const bytes = new TextEncoder().encode("hello");
+    setScenario({
+      bytes,
+      getfilelinkResponseFactory: () =>
+        jsonResponse({ result: 0, hosts: [CONTENT_HOST], path: contentPath }),
+    });
+    const result = await callTool("read_file", {
+      path: scenario.virtualPath,
+      maxBytes: bytes.byteLength,
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud getfilelink returned an invalid response.",
+    );
+    assert.equal(pCloudCallCount("/getfilelink"), 1);
+    assert.equal(
+      fetchCalls.filter(({ url }) => url.hostname === CONTENT_HOST).length,
+      0,
+    );
+  }
+
+  setScenario({
+    getfilelinkResponseFactory: () =>
+      jsonResponse({
+        result: 0,
+        hosts: [`content\uD800.pcloud.com`],
+        path: CONTENT_PATH,
+      }),
+  });
+  const invalidContentHost = await callTool("read_file", {
+    path: scenario.virtualPath,
+    maxBytes: scenario.bytes.byteLength,
+  });
+  assert.equal(invalidContentHost.isError, true);
+  assert.equal(
+    invalidContentHost.content[0].text,
+    "pCloud getfilelink returned an invalid response.",
+  );
+  assert.equal(pCloudCallCount("/getfilelink"), 1);
+  assert.equal(
+    fetchCalls.filter(({ url }) => url.hostname.endsWith("pcloud.com")).length,
+    2,
+  );
+
+  const pairedPath = "/\uD83D\uDE00";
+  setScenario({ virtualPath: pairedPath });
+  const pairedResult = parseToolText(
+    await callTool("get_file_info", { path: pairedPath }),
+  );
+  assert.equal(pairedResult.path, pairedPath);
+  const statRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
+  assert.equal(
+    statRequest.url.searchParams.get("path"),
+    `${ROOT_PATH}${pairedPath}`,
+  );
+  assert.equal(pCloudCallCount("/stat"), 1);
+});
+
 test("listfolder entry names enforce the 1024-byte UTF-8 boundary", async () => {
   const multibyteAccepted = `${"\u00e9".repeat(511)}a`;
   const multibyteRejected = "\u00e9".repeat(512);

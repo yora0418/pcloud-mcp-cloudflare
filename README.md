@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication is on hold. A subsequent independent audit identified release-blocking pCloud response and path-validation issues. Remediation is implemented, but production integration validation and repeat independent review remain pending. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
+> **Status:** v0.1 release candidate; publication is on hold. Follow-up pCloud response and path-validation remediation passed production integration for the preceding candidate. Repeat independent review then identified an additional exact-path Unicode issue; the latest remediation is implemented, while production validation and repeat independent review of that revision remain pending. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
@@ -66,7 +66,7 @@ MCP /Documents   -> pCloud /Sync/Documents
 
 All path-based tools stay beneath that virtual root. When a scoped root is configured, direct `folderId` access in `list_folder` is disabled so folder IDs cannot bypass the boundary.
 
-Virtual path strings are used exactly as supplied: spaces at the beginning or end of a filename segment are preserved rather than trimmed. An omitted optional path defaults to `/`, while an explicitly empty path, empty segments, `.` or `..` segments, backslashes, control characters, and overlong segments are rejected.
+Virtual path strings are used exactly as supplied: spaces at the beginning or end of a filename segment are preserved rather than trimmed. An omitted optional path defaults to `/`, while an explicitly empty path, empty segments, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, and overlong segments are rejected. Valid Unicode surrogate pairs are preserved without replacement.
 
 If `PCLOUD_ROOT_PATH` is unset, the real pCloud root remains visible as `/`.
 

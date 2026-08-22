@@ -129,7 +129,7 @@ This is a security and usability boundary, not merely a default folder.
 Rules:
 
 - all path-based tools resolve virtual paths beneath `PCLOUD_ROOT_PATH`
-- virtual paths must be absolute and cannot contain empty, `.` or `..` segments, backslashes, control characters, or filename segments of 1,024 UTF-8 bytes or more
+- virtual paths must be absolute and cannot contain empty, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, or filename segments of 1,024 UTF-8 bytes or more; valid surrogate pairs are preserved exactly
 - omitted optional paths default to `/`, but supplied path strings are never trimmed; leading and trailing spaces within filename segments remain significant
 - when `PCLOUD_ROOT_PATH` is a subfolder, direct `folderId` access is disabled in `list_folder` so an ID cannot bypass the scoped root
 - tool responses expose virtual paths rather than the physical root prefix
@@ -262,7 +262,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. A subsequent independent audit identified release-blocking pCloud response and path-validation issues. Remediation is implemented, but production integration validation and repeat independent review remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
+The repository remains private and publication is on hold. Follow-up pCloud response and path-validation remediation passed production integration for the preceding candidate. Repeat independent review then identified an additional exact-path Unicode issue; the latest remediation is implemented, while production validation and repeat independent review of that revision remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
 
 ## License
 
@@ -358,7 +358,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — follow-up remediation implemented, validation pending
+#### Phase 8.4 — external audit remediation — latest follow-up remediation implemented, validation pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -368,7 +368,8 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - retain the existing embedded Office resource transport without adding standalone resource APIs
 - complete the initial external remediation and production integration validation
 - after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
-- repeat production integration validation and independent review before release approval; the earlier Git history / secret review passed, but publication remains blocked until the follow-up findings are cleared
+- validate that follow-up candidate in production, including exact paths with trailing spaces, then reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them
+- repeat production integration validation and independent review for the latest remediation before release approval; the earlier Git history / secret review passed, but publication remains blocked until the follow-up findings are cleared
 
 ### Later
 
