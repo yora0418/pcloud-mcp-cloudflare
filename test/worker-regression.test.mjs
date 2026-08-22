@@ -854,11 +854,11 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
   ]);
   setScenario({
-    virtualPath: "/ Images / sample.png",
+    virtualPath: "/ Images /sample.png ",
     bytes: png,
     metadata: {
       isfolder: false,
-      name: " sample.png",
+      name: "sample.png ",
       size: png.byteLength,
       contenttype: "image/png",
     },
@@ -872,16 +872,17 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
   );
   assert.equal(
     imageStatRequest.url.searchParams.get("path"),
-    `${ROOT_PATH}/ Images / sample.png`,
+    `${ROOT_PATH}/ Images /sample.png `,
   );
+  assert.equal(pCloudCallCount("/getfilelink"), 1);
 
   const docx = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02]);
   setScenario({
-    virtualPath: "/ Office / sample.docx",
+    virtualPath: "/ Office /sample.docx ",
     bytes: docx,
     metadata: {
       isfolder: false,
-      name: " sample.docx",
+      name: "sample.docx ",
       size: docx.byteLength,
       contenttype:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -890,14 +891,19 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
   const office = await callTool("get_office_content", {
     path: scenario.virtualPath,
   });
-  assert.equal(office.content[0].type, "resource");
+  assert.equal(office.isError, true);
+  assert.equal(
+    office.content[0].text,
+    'File at virtual path "/ Office /sample.docx " is not a supported DOCX, XLSX, or PPTX file.',
+  );
   const officeStatRequest = fetchCalls.find(
     ({ url }) => url.pathname === "/stat",
   );
   assert.equal(
     officeStatRequest.url.searchParams.get("path"),
-    `${ROOT_PATH}/ Office / sample.docx`,
+    `${ROOT_PATH}/ Office /sample.docx `,
   );
+  assert.equal(pCloudCallCount("/getfilelink"), 0);
 
   setScenario({
     listMetadataByPath: {
