@@ -91,7 +91,7 @@ The Worker uses:
 - `PCLOUD_API_HOST` as deployment configuration (`api.pcloud.com` for US or `eapi.pcloud.com` for EU)
 - optional `PCLOUD_ROOT_PATH` as the physical pCloud folder exposed as the MCP-visible `/`
 
-Every pCloud JSON API response is read within its method-specific byte limit and must be a JSON object with an explicit canonical `result` code. Metadata is consumed only after `result` has been validated as zero; a missing or malformed result fails closed rather than being treated as success.
+Every pCloud JSON API response is read within its method-specific byte limit and must be a JSON object with an explicit canonical `result` code. Metadata is consumed only after `result` has been validated as zero; a missing or malformed result fails closed rather than being treated as success. Successful path-based `stat` and `listfolder` responses must identify the exact requested path, while an unscoped ID-based listing must identify the exact canonical folder ID. A target mismatch rejects the response before metadata is used.
 
 ### Future possibility: shared OAuth application
 
@@ -129,7 +129,7 @@ This is a security and usability boundary, not merely a default folder.
 Rules:
 
 - all path-based tools resolve virtual paths beneath `PCLOUD_ROOT_PATH`
-- virtual paths must be absolute and cannot contain empty, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, or filename segments of 1,024 UTF-8 bytes or more; valid surrogate pairs are preserved exactly
+- virtual paths must be absolute and cannot contain empty, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, filename segments of 1,024 UTF-8 bytes or more, or a complete UTF-8 path over 16 KiB; the resolved physical path uses the same aggregate byte limit, and valid surrogate pairs are preserved exactly
 - omitted optional paths default to `/`, but supplied path strings are never trimmed; leading and trailing spaces within filename segments remain significant
 - when `PCLOUD_ROOT_PATH` is a subfolder, direct `folderId` access is disabled in `list_folder` so an ID cannot bypass the scoped root
 - tool responses expose virtual paths rather than the physical root prefix
@@ -143,13 +143,15 @@ The MCP surface should be small and task-oriented rather than mirroring the full
 
 Every tool advertises MCP annotations that describe it as read-only, non-destructive, and idempotent. pCloud-backed tools retain the open-world hint because they retrieve externally stored metadata or content; the local `hello` check is closed-world. These hints support client UX and risk assessment but are not security controls. The Worker enforces the actual read-only and virtual-root boundaries.
 
+v0.1 does not publish events or use subscriptions. The fixed MCP SDK's per-handler `maxSubscriptions` option is set to zero, which rejects `subscriptions/listen` before a long-lived SSE response can be opened while leaving the seven registered tools unchanged.
+
 ### `list_folder`
 
 List entries in a folder. Paths are virtual paths relative to the configured MCP root.
 
 For scoped deployments, direct folder IDs are not accepted because they could bypass the virtual-root boundary.
 
-The Worker requires a successful `listfolder` response to contain folder metadata (`isfolder: true`) and a complete `contents` array. Every entry must be an object with a supported exact name and boolean folder marker; one malformed entry rejects the whole operation instead of producing a partial listing. Entry paths are reconstructed only from the already-validated virtual parent and exact entry name. The upstream physical `path` field is never used in tool output; when an unscoped caller lists by folder ID and no trusted virtual parent is available, folder and entry paths are omitted.
+The Worker requires a successful `listfolder` response to contain folder metadata (`isfolder: true`) and a complete `contents` array. Every entry must be an object with a supported exact name and boolean folder marker; one malformed entry rejects the whole operation instead of producing a partial listing. Entry paths are reconstructed only from the already-validated virtual parent and exact entry name. The upstream physical `path` field is never used in tool output; when an unscoped caller lists by folder ID and no trusted virtual parent is available, folder and entry paths are omitted. A 1 MiB aggregate serialization budget bounds the complete MCP metadata result; overflow rejects the listing rather than returning a partial response.
 
 ### `search_files`
 
@@ -163,7 +165,7 @@ Search file/folder metadata under a virtual path. The initial implementation is 
 
 pCloud's documented API does not expose a dedicated general filename search method. The implementation therefore calls `listfolder` without recursive mode for one folder at a time and traverses the tree iteratively in the Worker. Traversal is path-based: response-derived folder names are validated and joined beneath the already-resolved physical and virtual parent paths. Response-derived or caller-supplied folder IDs are not used, so traversal cannot bypass the configured virtual root through an ID.
 
-Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, and defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any response or traversal bound while work remains returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
+Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, retains at most 2,048 pending folders and a conservative 2 MiB storage budget for pending physical/virtual paths, and emits at most a 1 MiB serialized metadata result. The storage estimate uses the larger of UTF-8 bytes and JavaScript UTF-16 code-unit storage for each string, plus fixed per-folder overhead. Processed queue entries are released as traversal advances. It defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any aggregate, response, or traversal bound returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
 
 This is **not** full-text content search.
 
@@ -187,6 +189,7 @@ Retrieve a supported text file by virtual path while applying the same virtual-r
 - allows text MIME types and a conservative extension fallback for generic MIME types
 - obtains a temporary content request through `getfilelink` and accepts only HTTPS content hosts matching `*.pcloud.com`
 - fetches raw bytes without following redirects, enforces the byte limit while receiving them, and decodes them strictly as UTF-8
+- wraps unexpected content-stream failures in a generic error so runtime or upstream exception details cannot expose a temporary URL or physical path
 - requires the downloaded byte length to exactly match metadata, then rejects folders, binary formats, unsupported types, non-UTF-8 text, oversized files, and partial or inconsistent reads; support for additional text encodings may be added later
 - does not expose physical paths, temporary download URLs, or caller-supplied file-ID access
 
@@ -223,6 +226,8 @@ The pCloud root folder has folder ID `0`, but scoped deployments intentionally a
 
 `search_files` deliberately avoids pCloud recursive `listfolder` responses. A production diagnostic measured an unfiltered recursive whole-tree response at more than 32 MiB, so that strategy is unsuitable for the bounded v0.1 search path. The Worker instead reconstructs paths from validated names while requesting each folder non-recursively, keeping every JSON response independently bounded and reapplying the scoped parent path at each step.
 
+The [`getfilelink` response `path`](https://docs.pcloud.com/methods/streaming/getfilelink.html) is a temporary content-server request path, not an echo of the source file path, so comparing those two strings would reject valid responses rather than establish identity. Content tools instead perform a target-bound `stat`, submit that same resolved physical path in the authenticated `getfilelink` form body, validate the returned HTTPS pCloud content host and download path, and require the downloaded body to match the stat size plus the tool-specific format checks.
+
 pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
 Existing open-source pCloud MCP implementations may be used as references for pCloud-specific API behavior, but this project is a new Cloudflare Workers-oriented implementation rather than a fork of a server-based MCP implementation.
@@ -243,6 +248,8 @@ Characteristics:
 - no dedicated VPS / home server requirement
 - preview URLs explicitly disabled while the normal production `workers.dev` route remains available for Access protection
 
+The tracked observability policy enables invocation logs at full sampling and explicitly disables Workers Traces. Application messages are limited to generic authentication and configuration failures and must never contain credentials, physical pCloud paths, temporary content URLs, filenames, or content bytes. Traces stay disabled because automatically captured outbound-request metadata can reveal sensitive pCloud request targets. Self-hosters must review retention, access, and disclosure implications before enabling additional telemetry.
+
 `keep_vars` is enabled in Wrangler so self-hosters can configure deployment-specific variables in the Cloudflare dashboard without having those values removed by subsequent GitHub/Wrangler deployments.
 
 ## Deployment / ownership model
@@ -262,7 +269,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. The latest pCloud response and exact-path remediation, including unpaired UTF-16 surrogate rejection, has passed production integration validation. The latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding has been corrected. The next gate is a final independent pre-publication audit followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
+The repository remains private and publication is on hold. Additional audit remediation for unused MCP subscriptions, aggregate metadata budgets, upstream target binding, content-stream errors, observability, and supported Node.js lines is implemented. Production live regression and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
 
 ## License
 
@@ -358,7 +365,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — follow-up remediation and production validation complete, final audit pending
+#### Phase 8.4 — external audit remediation — additional remediation implemented, production revalidation and final audit pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -370,7 +377,8 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
 - reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them; the latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding was corrected
 - complete production integration validation for the latest remediation, including authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
-- require a final independent pre-publication audit and explicit release approval; the earlier Git history / secret review passed, but publication remains blocked until those final gates are complete
+- explicitly disable unused MCP subscriptions; bind successful metadata responses to their requested target; bound aggregate paths, pending search work, and serialized metadata results; sanitize content-stream failures; and align observability and supported Node.js lines
+- require production live regression, a final independent pre-publication audit, and explicit release approval; the earlier Git history / secret review passed, but publication remains blocked until those final gates are complete
 
 ### Later
 

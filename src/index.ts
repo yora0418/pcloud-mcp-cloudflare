@@ -61,6 +61,13 @@ class PCloudContentLimitError extends Error {
   }
 }
 
+class PCloudPathLimitError extends Error {
+  constructor() {
+    super("pCloud path exceeded the aggregate byte safety limit.");
+    this.name = "PCloudPathLimitError";
+  }
+}
+
 const PCLOUD_CONTENT_HOST_SUFFIX = ".pcloud.com";
 
 const DEFAULT_READ_MAX_BYTES = 256 * 1024;
@@ -71,6 +78,12 @@ const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const PCLOUD_GETFILELINK_JSON_MAX_BYTES = 64 * 1024;
 const SEARCH_MAX_SCANNED_ENTRIES = 10_000;
 const SEARCH_MAX_DEPTH = 64;
+const PCLOUD_PATH_MAX_BYTES = 16 * 1024;
+const MCP_METADATA_RESULT_MAX_BYTES = 1024 * 1024;
+const SEARCH_MAX_PENDING_FOLDERS = 2_048;
+const SEARCH_MAX_PENDING_PATH_BYTES = 2 * 1024 * 1024;
+const SEARCH_FOLDER_QUEUE_OVERHEAD_BYTES = 64;
+const MCP_METADATA_RESULT_ENTRY_OVERHEAD_BYTES = 64;
 const OOXML_ZIP_SIGNATURE = [0x50, 0x4b, 0x03, 0x04] as const;
 const LOCAL_READ_ONLY_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -211,6 +224,20 @@ function hasUnpairedSurrogate(value: string): boolean {
   return false;
 }
 
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function retainedStringBudgetBytes(value: string): number {
+  return Math.max(utf8ByteLength(value), value.length * 2);
+}
+
+function assertPathByteLimit(path: string): void {
+  if (utf8ByteLength(path) > PCLOUD_PATH_MAX_BYTES) {
+    throw new PCloudPathLimitError();
+  }
+}
+
 function normalizeAbsolutePath(value: string, label: string): string {
   const path = value;
 
@@ -245,10 +272,21 @@ function normalizeAbsolutePath(value: string, label: string): string {
 
   if (
     segments.some(
-      (segment) => new TextEncoder().encode(segment).byteLength >= 1024,
+      (segment) => utf8ByteLength(segment) >= 1024,
     )
   ) {
     throw new Error(`${label} contains a path segment that is too long.`);
+  }
+
+  try {
+    assertPathByteLimit(path);
+  } catch (error) {
+    if (error instanceof PCloudPathLimitError) {
+      throw new Error(
+        `${label} exceeds the ${PCLOUD_PATH_MAX_BYTES}-byte path safety limit.`,
+      );
+    }
+    throw error;
   }
 
   return path;
@@ -291,14 +329,29 @@ function resolveVirtualPath(env: Env, value?: string): {
     return { virtualPath, physicalPath: virtualPath };
   }
 
+  const physicalPath =
+    virtualPath === "/" ? rootPath : `${rootPath}${virtualPath}`;
+  try {
+    assertPathByteLimit(physicalPath);
+  } catch (error) {
+    if (error instanceof PCloudPathLimitError) {
+      throw new Error(
+        `Resolved pCloud path exceeds the ${PCLOUD_PATH_MAX_BYTES}-byte path safety limit.`,
+      );
+    }
+    throw error;
+  }
+
   return {
     virtualPath,
-    physicalPath: virtualPath === "/" ? rootPath : `${rootPath}${virtualPath}`,
+    physicalPath,
   };
 }
 
 function joinVirtualPath(parentPath: string, name: string): string {
-  return parentPath === "/" ? `/${name}` : `${parentPath}/${name}`;
+  const joined = parentPath === "/" ? `/${name}` : `${parentPath}/${name}`;
+  assertPathByteLimit(joined);
+  return joined;
 }
 
 function relativeSearchPath(basePath: string, fullPath: string): string {
@@ -518,6 +571,38 @@ async function fetchPCloudFileContent(url: URL): Promise<Response> {
   }
 }
 
+function validatePCloudResponseTarget(
+  method: string,
+  params: Record<string, string>,
+  metadata: PCloudMetadata | undefined,
+): void {
+  if (method !== "stat" && method !== "listfolder") {
+    return;
+  }
+
+  if (!metadata) {
+    throw new Error(`pCloud ${method} response did not identify its target.`);
+  }
+
+  const requestedPath = params.path;
+  if (requestedPath !== undefined) {
+    if (metadata.path !== requestedPath) {
+      throw new Error(`pCloud ${method} response did not match the requested target.`);
+    }
+    return;
+  }
+
+  const requestedFolderId = params.folderid;
+  if (
+    requestedFolderId !== undefined &&
+    optionalPCloudId(metadata.folderid, metadata.id, "d") !== requestedFolderId
+  ) {
+    throw new Error(
+      "pCloud listfolder response did not match the requested target.",
+    );
+  }
+}
+
 async function callPCloudJson(
   env: Env,
   method: string,
@@ -553,6 +638,8 @@ async function callPCloudJson(
   if (result !== 0) {
     throw new PCloudApiError(String(result));
   }
+
+  validatePCloudResponseTarget(method, params, data.metadata);
 
   return data;
 }
@@ -908,6 +995,12 @@ async function readResponseBytesWithinLimit(
 
       chunks.push(value);
     }
+  } catch (error) {
+    if (error instanceof PCloudContentLimitError) {
+      throw error;
+    }
+
+    throw new Error("pCloud content response stream failed.");
   } finally {
     reader.releaseLock();
   }
@@ -1066,6 +1159,44 @@ function compactPCloudEntry(
   };
 }
 
+function reserveMetadataResultBudget(
+  usedBytes: number,
+  value: unknown,
+  limitErrorMessage: string,
+): number {
+  const serialized = JSON.stringify(value);
+  const nextBytes =
+    usedBytes +
+    utf8ByteLength(serialized) +
+    MCP_METADATA_RESULT_ENTRY_OVERHEAD_BYTES;
+  if (nextBytes > MCP_METADATA_RESULT_MAX_BYTES) {
+    throw new Error(limitErrorMessage);
+  }
+  return nextBytes;
+}
+
+function stringifyBoundedMetadataResult(
+  value: unknown,
+  limitErrorMessage: string,
+): string {
+  const serialized = JSON.stringify(value, null, 2);
+  if (utf8ByteLength(serialized) > MCP_METADATA_RESULT_MAX_BYTES) {
+    throw new Error(limitErrorMessage);
+  }
+  return serialized;
+}
+
+function searchFolderQueueBytes(folder: {
+  virtualPath: string;
+  physicalPath: string;
+}): number {
+  return (
+    retainedStringBudgetBytes(folder.virtualPath) +
+    retainedStringBudgetBytes(folder.physicalPath) +
+    SEARCH_FOLDER_QUEUE_OVERHEAD_BYTES
+  );
+}
+
 function createServer(env: Env) {
   const server = new McpServer({
     name: "pcloud-mcp-cloudflare",
@@ -1102,7 +1233,7 @@ function createServer(env: Env) {
       inputSchema: {
         folderId: z
           .string()
-          .regex(/^\d+$/)
+          .regex(/^(?:0|[1-9]\d*)$/)
           .optional()
           .describe(
             "pCloud folder ID. Disabled when PCLOUD_ROOT_PATH scopes the MCP to a subfolder. Prefer path.",
@@ -1151,15 +1282,37 @@ function createServer(env: Env) {
         const folder = data.metadata;
         const contents = getPCloudFolderContents(folder);
         const limit = maxEntries ?? 200;
+        const resultLimitError =
+          `Folder listing exceeded the ${MCP_METADATA_RESULT_MAX_BYTES}-byte aggregate response safety limit; no complete folder listing was returned. Retry with a lower maxEntries.`;
+        const entries: ReturnType<typeof compactPCloudEntry>[] = [];
+        let resultBudgetBytes = 4 * 1024;
 
-        const entries = contents.slice(0, limit).map((entry) => {
-          const virtualEntryPath =
-            requestedVirtualPath !== undefined
-              ? joinVirtualPath(requestedVirtualPath, entry.name)
-              : undefined;
+        for (const entry of contents.slice(0, limit)) {
+          let virtualEntryPath: string | undefined;
+          if (requestedVirtualPath !== undefined) {
+            try {
+              virtualEntryPath = joinVirtualPath(
+                requestedVirtualPath,
+                entry.name,
+              );
+            } catch (error) {
+              if (error instanceof PCloudPathLimitError) {
+                throw new Error(
+                  `Folder listing encountered a path exceeding the ${PCLOUD_PATH_MAX_BYTES}-byte safety limit; no complete folder listing was returned. Retry with a narrower path.`,
+                );
+              }
+              throw error;
+            }
+          }
 
-          return compactPCloudEntry(entry, virtualEntryPath);
-        });
+          const compactEntry = compactPCloudEntry(entry, virtualEntryPath);
+          resultBudgetBytes = reserveMetadataResultBudget(
+            resultBudgetBytes,
+            compactEntry,
+            resultLimitError,
+          );
+          entries.push(compactEntry);
+        }
 
         const folderPath = requestedVirtualPath;
         const folderName =
@@ -1185,7 +1338,7 @@ function createServer(env: Env) {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: stringifyBoundedMetadataResult(result, resultLimitError),
             },
           ],
         };
@@ -1252,7 +1405,10 @@ function createServer(env: Env) {
         const lowerNeedle = needle.toLocaleLowerCase();
         const returnFolders = includeFolders ?? true;
         const limit = maxResults ?? 50;
+        const resultLimitError =
+          `Search exceeded the ${MCP_METADATA_RESULT_MAX_BYTES}-byte aggregate response safety limit; no complete search result was returned. Retry with a lower maxResults or a narrower path.`;
         const matches: ReturnType<typeof compactPCloudEntry>[] = [];
+        let resultBudgetBytes = 4 * 1024;
         let scannedEntries = 0;
         let totalMatches = 0;
         let folderApiCalls = 0;
@@ -1262,14 +1418,17 @@ function createServer(env: Env) {
           physicalPath: string;
           depth: number;
         };
-        const pendingFolders: SearchFolder[] = [
-          {
-            virtualPath: resolved.virtualPath,
-            physicalPath: resolved.physicalPath,
-            depth: 0,
-          },
+        const rootSearchFolder: SearchFolder = {
+          virtualPath: resolved.virtualPath,
+          physicalPath: resolved.physicalPath,
+          depth: 0,
+        };
+        const pendingFolders: Array<SearchFolder | undefined> = [
+          rootSearchFolder,
         ];
         let nextFolderIndex = 0;
+        let pendingFolderCount = 1;
+        let pendingPathBytes = searchFolderQueueBytes(rootSearchFolder);
 
         while (nextFolderIndex < pendingFolders.length) {
           if (folderApiCalls >= maxFolderApiCalls) {
@@ -1279,7 +1438,13 @@ function createServer(env: Env) {
           }
 
           const folder = pendingFolders[nextFolderIndex];
+          if (!folder) {
+            throw new Error("Search encountered an invalid traversal state.");
+          }
+          pendingFolders[nextFolderIndex] = undefined;
           nextFolderIndex += 1;
+          pendingFolderCount -= 1;
+          pendingPathBytes -= searchFolderQueueBytes(folder);
           folderApiCalls += 1;
           const data = await callPCloudJson(env, "listfolder", {
             path: folder.physicalPath,
@@ -1302,7 +1467,17 @@ function createServer(env: Env) {
             }
 
             const { name, isFolder } = entry;
-            const virtualPath = joinVirtualPath(folder.virtualPath, name);
+            let virtualPath: string;
+            try {
+              virtualPath = joinVirtualPath(folder.virtualPath, name);
+            } catch (error) {
+              if (error instanceof PCloudPathLimitError) {
+                throw new Error(
+                  `Search encountered a path exceeding the ${PCLOUD_PATH_MAX_BYTES}-byte safety limit; no complete search result was returned. Retry with a narrower path.`,
+                );
+              }
+              throw error;
+            }
             const relativePath = relativeSearchPath(
               resolved.virtualPath,
               virtualPath,
@@ -1313,16 +1488,51 @@ function createServer(env: Env) {
             if (matchesQuery && (returnFolders || !isFolder)) {
               totalMatches += 1;
               if (matches.length < limit) {
-                matches.push(compactPCloudEntry(entry, virtualPath));
+                const compactEntry = compactPCloudEntry(entry, virtualPath);
+                resultBudgetBytes = reserveMetadataResultBudget(
+                  resultBudgetBytes,
+                  compactEntry,
+                  resultLimitError,
+                );
+                matches.push(compactEntry);
               }
             }
 
             if (isFolder) {
-              pendingFolders.push({
+              let physicalPath: string;
+              try {
+                physicalPath = joinVirtualPath(folder.physicalPath, name);
+              } catch (error) {
+                if (error instanceof PCloudPathLimitError) {
+                  throw new Error(
+                    `Search encountered a path exceeding the ${PCLOUD_PATH_MAX_BYTES}-byte safety limit; no complete search result was returned. Retry with a narrower path.`,
+                  );
+                }
+                throw error;
+              }
+
+              const pendingFolder: SearchFolder = {
                 virtualPath,
-                physicalPath: joinVirtualPath(folder.physicalPath, name),
+                physicalPath,
                 depth: entryDepth,
-              });
+              };
+              const pendingFolderBytes = searchFolderQueueBytes(pendingFolder);
+              if (pendingFolderCount >= SEARCH_MAX_PENDING_FOLDERS) {
+                throw new Error(
+                  `Search exceeded the ${SEARCH_MAX_PENDING_FOLDERS}-pending-folder safety limit; no complete search result was returned. Retry with a narrower path.`,
+                );
+              }
+              if (
+                pendingPathBytes + pendingFolderBytes >
+                SEARCH_MAX_PENDING_PATH_BYTES
+              ) {
+                throw new Error(
+                  `Search exceeded the ${SEARCH_MAX_PENDING_PATH_BYTES}-byte pending-path safety limit; no complete search result was returned. Retry with a narrower path.`,
+                );
+              }
+              pendingFolders.push(pendingFolder);
+              pendingFolderCount += 1;
+              pendingPathBytes += pendingFolderBytes;
             }
           }
         }
@@ -1341,6 +1551,10 @@ function createServer(env: Env) {
             maxScannedEntries: SEARCH_MAX_SCANNED_ENTRIES,
             maxDepth: SEARCH_MAX_DEPTH,
             maxFolderApiCalls,
+            maxPathBytes: PCLOUD_PATH_MAX_BYTES,
+            maxPendingFolders: SEARCH_MAX_PENDING_FOLDERS,
+            maxPendingPathBytes: SEARCH_MAX_PENDING_PATH_BYTES,
+            maxResultBytes: MCP_METADATA_RESULT_MAX_BYTES,
           },
           searchType: "metadata-name-and-path-substring",
         };
@@ -1349,7 +1563,7 @@ function createServer(env: Env) {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: stringifyBoundedMetadataResult(result, resultLimitError),
             },
           ],
         };
@@ -1711,6 +1925,12 @@ function createServer(env: Env) {
   return server;
 }
 
+function createConfiguredMcpHandler(env: Env): McpHandler {
+  return createMcpHandler(() => createServer(env), {
+    maxSubscriptions: 0,
+  });
+}
+
 export default {
   async fetch(
     request: Request,
@@ -1753,7 +1973,7 @@ export default {
           return await dispatchBoundedMcpRequest(
             request,
             (guardedRequest) => {
-              const mcpHandler = createMcpHandler(() => createServer(env));
+              const mcpHandler = createConfiguredMcpHandler(env);
               return mcpHandler(guardedRequest, env, ctx);
             },
           );
@@ -1768,7 +1988,7 @@ export default {
         }
       }
 
-      const mcpHandler = createMcpHandler(() => createServer(env));
+      const mcpHandler = createConfiguredMcpHandler(env);
       return mcpHandler(request, env, ctx);
     }
 

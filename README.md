@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication is on hold. The latest pCloud response and exact-path remediation, including unpaired UTF-16 surrogate rejection, has passed production integration validation. The latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding has been corrected. The next gate is a final independent pre-publication audit followed by explicit release approval. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
+> **Status:** v0.1 release candidate; publication is on hold. Additional audit remediation for unused MCP subscriptions, aggregate metadata budgets, upstream target binding, content-stream errors, observability, and supported Node.js lines is implemented. Production live regression and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
@@ -66,7 +66,7 @@ MCP /Documents   -> pCloud /Sync/Documents
 
 All path-based tools stay beneath that virtual root. When a scoped root is configured, direct `folderId` access in `list_folder` is disabled so folder IDs cannot bypass the boundary.
 
-Virtual path strings are used exactly as supplied: spaces at the beginning or end of a filename segment are preserved rather than trimmed. An omitted optional path defaults to `/`, while an explicitly empty path, empty segments, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, and overlong segments are rejected. Valid Unicode surrogate pairs are preserved without replacement.
+Virtual path strings are used exactly as supplied: spaces at the beginning or end of a filename segment are preserved rather than trimmed. An omitted optional path defaults to `/`, while an explicitly empty path, empty segments, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, segments of 1,024 UTF-8 bytes or more, and complete paths over 16 KiB are rejected. The resolved physical path is subject to the same aggregate byte limit. Valid Unicode surrogate pairs are preserved without replacement.
 
 If `PCLOUD_ROOT_PATH` is unset, the real pCloud root remains visible as `/`.
 
@@ -80,7 +80,7 @@ A production payload diagnostic measured the unfiltered recursive whole-tree res
 
 It does **not** search inside file contents.
 
-Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, and by default 45 folder listings. If a safety limit is reached while folders remain, the tool returns an explicit error instead of an incomplete search result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
+Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, 2,048 pending folders, a conservative 2 MiB retained-path storage budget, a 1 MiB serialized metadata result, and by default 45 folder listings. `list_folder` uses the same 1 MiB serialized-result budget. If an aggregate, response, or traversal safety limit is reached, the tool returns an explicit error instead of an incomplete result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
 
 ## File metadata, text reading, image content, and Office content
 
@@ -99,6 +99,12 @@ Office bytes are carried as an embedded resource inside the tool result; the Wor
 ## Request safety limits
 
 Authenticated `/mcp` POST bodies are streamed through a 256 KiB (`262144` byte) gate before they reach the MCP SDK. Requests over the limit receive HTTP 413. The Worker also applies a Cloudflare Rate Limiting binding to authenticated MCP POST requests at 120 requests per 60 seconds per verified Access principal. The binding is a protective, location-local approximate limiter rather than an accounting mechanism; binding absence or failure causes MCP POST requests to fail closed with HTTP 503.
+
+The v0.1 server does not publish events or use MCP subscriptions. The SDK's `subscriptions/listen` capacity is explicitly set to zero, so a listen request is rejected without opening a long-lived SSE stream. This does not change the seven registered tools.
+
+## Observability and sensitive data
+
+The tracked Worker configuration enables invocation logs at full sampling and explicitly disables Workers Traces. Application logging is limited to generic authentication or configuration failures; it must not include pCloud tokens, physical paths, temporary content URLs, filenames, file bytes, or base64 payloads. Traces remain disabled because automatic outbound-request metadata can disclose sensitive pCloud request targets. Self-hosters who change these settings are responsible for reviewing Cloudflare retention, access, and redaction behavior before enabling additional telemetry.
 
 ## Runtime
 

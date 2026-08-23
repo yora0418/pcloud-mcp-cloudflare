@@ -16,6 +16,10 @@ const CONTENT_PATH = "/temporary/mock-content";
 const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const SEARCH_DEFAULT_MAX_FOLDER_API_CALLS = 45;
+const PCLOUD_PATH_MAX_BYTES = 16 * 1024;
+const MCP_METADATA_RESULT_MAX_BYTES = 1024 * 1024;
+const SEARCH_MAX_PENDING_FOLDERS = 2_048;
+const SEARCH_MAX_PENDING_PATH_BYTES = 2 * 1024 * 1024;
 
 let worker;
 let bundleDirectory;
@@ -76,20 +80,31 @@ function setScenario({
   statResponseFactory,
   listResponseFactory,
   getfilelinkResponseFactory,
+  contentStreamError,
 } = {}) {
+  const physicalPath =
+    rootPath === "/" || virtualPath === "/"
+      ? rootPath === "/"
+        ? virtualPath
+        : rootPath
+      : `${rootPath}${virtualPath}`;
+  const baseMetadata =
+    metadata ??
+    {
+      isfolder: false,
+      name: virtualPath.slice(virtualPath.lastIndexOf("/") + 1),
+      id: "f42",
+      fileid: 42,
+      size: bytes.byteLength,
+      contenttype: "text/markdown",
+    };
   scenario = {
     virtualPath,
     rootPath,
-    metadata:
-      metadata ??
-      {
-        isfolder: false,
-        name: virtualPath.slice(virtualPath.lastIndexOf("/") + 1),
-        id: "f42",
-        fileid: 42,
-        size: bytes.byteLength,
-        contenttype: "text/markdown",
-      },
+    physicalPath,
+    metadata: Object.hasOwn(baseMetadata, "path")
+      ? baseMetadata
+      : { ...baseMetadata, path: physicalPath },
     bytes,
     listMetadata,
     listMetadataByPath,
@@ -100,6 +115,7 @@ function setScenario({
     statResponseFactory,
     listResponseFactory,
     getfilelinkResponseFactory,
+    contentStreamError,
   };
   fetchCalls = [];
   contentCancelCount = 0;
@@ -220,7 +236,7 @@ before(async () => {
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
       assert.equal(
         url.searchParams.get("path"),
-        `${scenario.rootPath}${scenario.virtualPath}`,
+        scenario.physicalPath,
       );
       if (scenario.statResponseFactory) {
         return scenario.statResponseFactory();
@@ -255,7 +271,15 @@ before(async () => {
         (requestedPath === scenario.rootPath || requestedFolderId !== null
           ? scenario.listMetadata
           : undefined);
-      return jsonResponse({ result: 0, metadata });
+      const targetBoundMetadata =
+        metadata && requestedPath !== null && !Object.hasOwn(metadata, "path")
+          ? { ...metadata, path: requestedPath }
+          : metadata &&
+              requestedFolderId !== null &&
+              !Object.hasOwn(metadata, "folderid")
+            ? { ...metadata, folderid: requestedFolderId }
+            : metadata;
+      return jsonResponse({ result: 0, metadata: targetBoundMetadata });
     }
 
     if (
@@ -268,7 +292,7 @@ before(async () => {
       const form = new URLSearchParams(await request.text());
       assert.equal(
         form.get("path"),
-        `${scenario.rootPath}${scenario.virtualPath}`,
+        scenario.physicalPath,
       );
       assert.equal(form.get("access_token"), ACCESS_TOKEN);
       if (scenario.getfilelinkResponseFactory) {
@@ -291,6 +315,10 @@ before(async () => {
       let chunkIndex = 0;
       const body = new ReadableStream({
         pull(controller) {
+          if (scenario.contentStreamError) {
+            controller.error(scenario.contentStreamError);
+            return;
+          }
           if (chunkIndex >= scenario.streamingChunks.length) {
             if (!scenario.keepOpenOnExhaustion) {
               controller.close();
@@ -413,6 +441,44 @@ test("valid RS256 Access JWT reaches the Worker and tools declare read-only hint
     assert.equal(tool.annotations.idempotentHint, true);
     assert.equal(tool.annotations.openWorldHint, tool.name !== "hello");
   }
+});
+
+test("subscriptions/listen is disabled without affecting the seven tools", async () => {
+  rpcId += 1;
+  const response = await sendMcpRequest(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: rpcId,
+      method: "subscriptions/listen",
+      params: {
+        notifications: {},
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
+    {
+      headers: {
+        "MCP-Protocol-Version": "2026-07-28",
+        "MCP-Method": "subscriptions/listen",
+      },
+    },
+  );
+  const responseText = await response.text();
+  assert.equal(response.status, 200, responseText);
+  assert.doesNotMatch(
+    response.headers.get("content-type") ?? "",
+    /text\/event-stream/,
+  );
+  const payload = JSON.parse(responseText);
+  assert.equal(payload.error.code, -32603);
+  assert.equal(payload.error.message, "Subscription limit reached");
+
+  const tools = (await rpc("tools/list", {})).result.tools;
+  assert.equal(tools.length, 7);
+  const hello = await callTool("hello", {});
+  assert.match(hello.content[0].text, /is running/);
 });
 
 test("Access JWT verification rejects issuer, audience, algorithm, and expiry regressions", async () => {
@@ -702,13 +768,20 @@ test("folder listings fail closed on malformed metadata or entries", async () =>
 
   for (const metadata of invalidFolderMetadata) {
     setScenario({
-      listResponseFactory: () => jsonResponse({ result: 0, metadata }),
+      listResponseFactory: ({ requestedPath }) =>
+        jsonResponse({
+          result: 0,
+          metadata:
+            metadata && typeof metadata === "object" && !Array.isArray(metadata)
+              ? { ...metadata, path: requestedPath }
+              : metadata,
+        }),
     });
     const result = await callTool("list_folder", { path: "/" });
     assert.equal(result.isError, true);
-    assert.equal(
+    assert.match(
       result.content[0].text,
-      "pCloud listfolder returned invalid folder metadata.",
+      /pCloud listfolder (?:response did not identify its target|returned invalid folder metadata)/,
     );
   }
 
@@ -749,12 +822,67 @@ test("folder listings fail closed on malformed metadata or entries", async () =>
   }
 });
 
+test("pCloud metadata responses are bound to the requested path or folder ID", async () => {
+  setScenario({
+    statResponseFactory: () =>
+      jsonResponse({
+        result: 0,
+        metadata: { ...scenario.metadata, path: "/different/target" },
+      }),
+  });
+  let result = await callTool("get_file_info", {
+    path: scenario.virtualPath,
+  });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud stat response did not match the requested target.",
+  );
+
+  setScenario({
+    listResponseFactory: () =>
+      jsonResponse({
+        result: 0,
+        metadata: {
+          isfolder: true,
+          path: "/different/target",
+          contents: [],
+        },
+      }),
+  });
+  result = await callTool("list_folder", { path: "/" });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud listfolder response did not match the requested target.",
+  );
+
+  setScenario({
+    rootPath: "/",
+    listMetadata: {
+      isfolder: true,
+      folderid: "124",
+      contents: [],
+    },
+  });
+  result = await callTool(
+    "list_folder",
+    { folderId: "123" },
+    { PCLOUD_ROOT_PATH: "/" },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud listfolder response did not match the requested target.",
+  );
+});
+
 test("folder listing paths come only from validated virtual parents", async () => {
   setScenario({
     listMetadata: {
       isfolder: true,
       name: "Scoped",
-      path: "/private/physical/root",
+      path: ROOT_PATH,
       contents: [
         {
           isfolder: false,
@@ -777,6 +905,7 @@ test("folder listing paths come only from validated virtual parents", async () =
     listMetadata: {
       isfolder: true,
       name: "Folder by ID",
+      folderid: "123",
       path: "/private/physical/root",
       contents: [
         {
@@ -1259,6 +1388,10 @@ test("search uses non-recursive folder listings and completes traversal after ma
     maxScannedEntries: 10_000,
     maxDepth: 64,
     maxFolderApiCalls: SEARCH_DEFAULT_MAX_FOLDER_API_CALLS,
+    maxPathBytes: PCLOUD_PATH_MAX_BYTES,
+    maxPendingFolders: SEARCH_MAX_PENDING_FOLDERS,
+    maxPendingPathBytes: SEARCH_MAX_PENDING_PATH_BYTES,
+    maxResultBytes: MCP_METADATA_RESULT_MAX_BYTES,
   });
   assert.equal(
     fetchCalls
@@ -1340,12 +1473,108 @@ test("search rejects scanned-entry and depth overflow without partial results", 
   assert.equal(pCloudCallCount("/listfolder"), 65);
 });
 
+test("aggregate path, queue, and result budgets fail closed before amplification", async () => {
+  const overlongPath = `/${Array.from({ length: 17 }, () => "p".repeat(1000)).join("/")}`;
+  setScenario();
+  let result = await callTool("get_file_info", { path: overlongPath });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /16384-byte path safety limit/);
+  assert.equal(pCloudCallCount("/stat"), 0);
+
+  const longListEntries = Array.from({ length: 500 }, (_, index) => {
+    const prefix = `${String(index).padStart(4, "0")}-`;
+    return {
+      isfolder: false,
+      name: `${prefix}${"l".repeat(1022 - prefix.length)}`,
+      size: 1,
+    };
+  });
+  setScenario({
+    listMetadata: { isfolder: true, contents: longListEntries },
+  });
+  result = await callTool("list_folder", { path: "/", maxEntries: 500 });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /aggregate response safety limit/);
+  assert.match(result.content[0].text, /no complete folder listing/);
+  assert.ok(!JSON.stringify(result).includes(longListEntries[0].name));
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: Array.from(
+        { length: SEARCH_MAX_PENDING_FOLDERS + 1 },
+        (_, index) => ({ isfolder: true, name: `folder-${index}` }),
+      ),
+    },
+  });
+  result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1024" },
+  );
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /2048-pending-folder safety limit/);
+  assert.match(result.content[0].text, /no complete search result/);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+
+  const longPendingFolders = Array.from({ length: 1_100 }, (_, index) => {
+    const prefix = `folder-${index}-`;
+    return {
+      isfolder: true,
+      name: `${prefix}${"q".repeat(1000 - prefix.length)}`,
+    };
+  });
+  setScenario({
+    listMetadata: { isfolder: true, contents: longPendingFolders },
+  });
+  result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1024" },
+  );
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /2097152-byte pending-path safety limit/);
+  assert.match(result.content[0].text, /no complete search result/);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+
+  const longBasePath = `/${Array.from({ length: 14 }, () => "b".repeat(1000)).join("/")}`;
+  const physicalLongBasePath = `${ROOT_PATH}${longBasePath}`;
+  const longMatchingFiles = Array.from({ length: 70 }, (_, index) => {
+    const prefix = `match-${index}-`;
+    return {
+      isfolder: false,
+      name: `${prefix}${"r".repeat(1000 - prefix.length)}`,
+      size: 1,
+    };
+  });
+  setScenario({
+    listMetadataByPath: {
+      [physicalLongBasePath]: {
+        isfolder: true,
+        contents: longMatchingFiles,
+      },
+    },
+  });
+  result = await callTool("search_files", {
+    query: "match",
+    path: longBasePath,
+    maxResults: 200,
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /aggregate response safety limit/);
+  assert.match(result.content[0].text, /no complete search result/);
+  assert.ok(!JSON.stringify(result).includes(longMatchingFiles[0].name));
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+});
+
 test("search defaults to 45 folder calls and rejects incomplete traversal explicitly", async () => {
   setScenario({
     listResponseFactory: ({ requestedPath }) =>
       jsonResponse({
         result: 0,
         metadata: {
+          path: requestedPath,
           isfolder: true,
           contents:
             requestedPath === ROOT_PATH
@@ -1470,6 +1699,7 @@ test("search distinguishes a folder JSON overflow and propagates traversal API e
         ? jsonResponse({
             result: 0,
             metadata: {
+              path: requestedPath,
               isfolder: true,
               contents: [{ isfolder: true, name: "Folder" }],
             },
@@ -1626,6 +1856,31 @@ test("virtual-root text retrieval and pre-download byte limits remain enforced",
   assert.equal(streamedOverflow.isError, true);
   assert.match(streamedOverflow.content[0].text, /exceeds the allowed maximum/);
   assert.equal(contentCancelCount, 1);
+
+  const upstreamErrorCanary =
+    "TEMPORARY_URL_CANARY PHYSICAL_PATH_CANARY";
+  setScenario({
+    virtualPath: "/Documents/note.md",
+    metadata: {
+      isfolder: false,
+      name: "note.md",
+      size: bytes.byteLength,
+      contenttype: "text/markdown",
+    },
+    contentLength: null,
+    streamingChunks: [],
+    contentStreamError: new Error(upstreamErrorCanary),
+  });
+  const streamFailure = await callTool("read_file", {
+    path: scenario.virtualPath,
+    maxBytes: bytes.byteLength,
+  });
+  assert.equal(streamFailure.isError, true);
+  assert.equal(
+    streamFailure.content[0].text,
+    "pCloud content response stream failed.",
+  );
+  assert.ok(!JSON.stringify(streamFailure).includes(upstreamErrorCanary));
 });
 
 test("traversal is rejected before any pCloud request", async () => {
