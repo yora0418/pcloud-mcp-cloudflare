@@ -571,12 +571,12 @@ async function fetchPCloudFileContent(url: URL): Promise<Response> {
   }
 }
 
-function validatePCloudResponseTarget(
+function validatePCloudListResponseTarget(
   method: string,
   params: Record<string, string>,
   metadata: PCloudMetadata | undefined,
 ): void {
-  if (method !== "stat" && method !== "listfolder") {
+  if (method !== "listfolder") {
     return;
   }
 
@@ -639,7 +639,7 @@ async function callPCloudJson(
     throw new PCloudApiError(String(result));
   }
 
-  validatePCloudResponseTarget(method, params, data.metadata);
+  validatePCloudListResponseTarget(method, params, data.metadata);
 
   return data;
 }
@@ -753,6 +753,13 @@ function normalizeFileMetadata(
 
 async function statVirtualFile(env: Env, path: string) {
   const resolved = resolveVirtualPath(env, path);
+
+  if (resolved.virtualPath === "/") {
+    throw new Error(
+      'Virtual path "/" is a folder. Use list_folder to browse folders.',
+    );
+  }
+
   let data: PCloudJsonResponse;
 
   try {
@@ -777,14 +784,16 @@ async function statVirtualFile(env: Env, path: string) {
     throw new Error("pCloud stat returned no file metadata.");
   }
 
+  if (metadata.isfolder !== true && metadata.isfolder !== false) {
+    throw new Error("pCloud stat returned invalid file metadata.");
+  }
+
+  await validatePCloudStatResponseTarget(env, resolved, metadata);
+
   if (metadata.isfolder === true) {
     throw new Error(
       `Virtual path ${JSON.stringify(resolved.virtualPath)} is a folder. Use list_folder to browse folders.`,
     );
-  }
-
-  if (metadata.isfolder !== false) {
-    throw new Error("pCloud stat returned invalid file metadata.");
   }
 
   return {
@@ -1157,6 +1166,56 @@ function compactPCloudEntry(
         ? metadata.contenttype
         : undefined,
   };
+}
+
+function exactPCloudObjectId(
+  metadata: Record<string, unknown>,
+  isFolder: boolean,
+): string | undefined {
+  return isFolder
+    ? optionalPCloudId(metadata.folderid, metadata.id, "d")
+    : optionalPCloudId(metadata.fileid, metadata.id, "f");
+}
+
+async function validatePCloudStatResponseTarget(
+  env: Env,
+  resolved: { virtualPath: string; physicalPath: string },
+  metadata: PCloudMetadata,
+): Promise<void> {
+  const separatorIndex = resolved.physicalPath.lastIndexOf("/");
+  const requestedName = resolved.physicalPath.slice(separatorIndex + 1);
+  const parentPath =
+    separatorIndex === 0 ? "/" : resolved.physicalPath.slice(0, separatorIndex);
+  const isFolder = metadata.isfolder === true;
+
+  if (metadata.name !== requestedName) {
+    throw new Error("pCloud stat response did not match the requested target.");
+  }
+
+  if (metadata.path === resolved.physicalPath) {
+    return;
+  }
+
+  const parentData = await callPCloudJson(env, "listfolder", {
+    path: parentPath,
+  });
+  const entries = getPCloudFolderContents(parentData.metadata);
+  const statId = exactPCloudObjectId(metadata, isFolder);
+  const matchingEntries = entries.filter(
+    (entry) =>
+      entry.name === requestedName && entry.isFolder === isFolder,
+  );
+
+  if (
+    statId === undefined ||
+    matchingEntries.length !== 1 ||
+    exactPCloudObjectId(
+      matchingEntries[0].metadata,
+      matchingEntries[0].isFolder,
+    ) !== statId
+  ) {
+    throw new Error("pCloud stat response did not match the requested target.");
+  }
 }
 
 function reserveMetadataResultBudget(

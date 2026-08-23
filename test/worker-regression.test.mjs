@@ -88,23 +88,30 @@ function setScenario({
         ? virtualPath
         : rootPath
       : `${rootPath}${virtualPath}`;
+  const separatorIndex = physicalPath.lastIndexOf("/");
+  const statParentPath =
+    separatorIndex === 0 ? "/" : physicalPath.slice(0, separatorIndex);
+  const identityDefaults =
+    metadata?.isfolder === true
+      ? { id: "d42", folderid: 42 }
+      : { id: "f42", fileid: 42 };
   const baseMetadata =
-    metadata ??
-    {
-      isfolder: false,
-      name: virtualPath.slice(virtualPath.lastIndexOf("/") + 1),
-      id: "f42",
-      fileid: 42,
-      size: bytes.byteLength,
-      contenttype: "text/markdown",
-    };
+    metadata === undefined
+      ? {
+          isfolder: false,
+          name: virtualPath.slice(virtualPath.lastIndexOf("/") + 1),
+          id: "f42",
+          fileid: 42,
+          size: bytes.byteLength,
+          contenttype: "text/markdown",
+        }
+      : { ...identityDefaults, ...metadata };
   scenario = {
     virtualPath,
     rootPath,
     physicalPath,
-    metadata: Object.hasOwn(baseMetadata, "path")
-      ? baseMetadata
-      : { ...baseMetadata, path: physicalPath },
+    statParentPath,
+    metadata: baseMetadata,
     bytes,
     listMetadata,
     listMetadataByPath,
@@ -270,6 +277,14 @@ before(async () => {
         scenario.listMetadataByPath?.[requestedPath] ??
         (requestedPath === scenario.rootPath || requestedFolderId !== null
           ? scenario.listMetadata
+          : undefined) ??
+        (requestedPath === scenario.statParentPath
+          ? {
+              isfolder: true,
+              id: "d7",
+              folderid: 7,
+              contents: [scenario.metadata],
+            }
           : undefined);
       const targetBoundMetadata =
         metadata && requestedPath !== null && !Object.hasOwn(metadata, "path")
@@ -822,7 +837,7 @@ test("folder listings fail closed on malformed metadata or entries", async () =>
   }
 });
 
-test("pCloud metadata responses are bound to the requested path or folder ID", async () => {
+test("pCloud metadata responses are bound to exact path-derived identity", async () => {
   setScenario({
     statResponseFactory: () =>
       jsonResponse({
@@ -830,14 +845,68 @@ test("pCloud metadata responses are bound to the requested path or folder ID", a
         metadata: { ...scenario.metadata, path: "/different/target" },
       }),
   });
-  let result = await callTool("get_file_info", {
-    path: scenario.virtualPath,
+  let info = parseToolText(
+    await callTool("get_file_info", { path: scenario.virtualPath }),
+  );
+  assert.equal(info.path, scenario.virtualPath);
+  assert.equal(info.fileId, "42");
+  assert.equal(pCloudCallCount("/stat"), 1);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+
+  setScenario({
+    metadata: {
+      isfolder: false,
+      name: "note.md",
+      path: `${ROOT_PATH}/Documents/note.md`,
+      size: 5,
+      contenttype: "text/markdown",
+    },
   });
+  info = parseToolText(
+    await callTool("get_file_info", { path: scenario.virtualPath }),
+  );
+  assert.equal(info.path, scenario.virtualPath);
+  assert.equal(pCloudCallCount("/stat"), 1);
+  assert.equal(pCloudCallCount("/listfolder"), 0);
+
+  setScenario({
+    statResponseFactory: () =>
+      jsonResponse({
+        result: 0,
+        metadata: {
+          ...scenario.metadata,
+          id: "f43",
+          fileid: 43,
+          path: "/different/target",
+        },
+      }),
+  });
+  let result = await callTool("get_file_info", { path: scenario.virtualPath });
   assert.equal(result.isError, true);
   assert.equal(
     result.content[0].text,
     "pCloud stat response did not match the requested target.",
   );
+  assert.equal(pCloudCallCount("/listfolder"), 1);
+
+  setScenario({
+    statResponseFactory: () =>
+      jsonResponse({
+        result: 0,
+        metadata: {
+          ...scenario.metadata,
+          name: "different-name.md",
+          path: scenario.physicalPath,
+        },
+      }),
+  });
+  result = await callTool("get_file_info", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    "pCloud stat response did not match the requested target.",
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 0);
 
   setScenario({
     listResponseFactory: () =>
@@ -1179,7 +1248,7 @@ test("unpaired surrogates fail closed across exact pCloud path boundaries", asyn
   assert.equal(pCloudCallCount("/getfilelink"), 1);
   assert.equal(
     fetchCalls.filter(({ url }) => url.hostname.endsWith("pcloud.com")).length,
-    2,
+    3,
   );
 
   const pairedPath = "/\uD83D\uDE00";
@@ -1194,6 +1263,7 @@ test("unpaired surrogates fail closed across exact pCloud path boundaries", asyn
     `${ROOT_PATH}${pairedPath}`,
   );
   assert.equal(pCloudCallCount("/stat"), 1);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
 });
 
 test("listfolder entry names enforce the 1024-byte UTF-8 boundary", async () => {
@@ -1745,6 +1815,7 @@ test("virtual-root text retrieval and pre-download byte limits remain enforced",
       name: "note.md",
       id: "f42",
       fileid: 42,
+      path: "/non-source/metadata-path",
       size: String(bytes.byteLength),
       contenttype: "text/markdown",
     },
@@ -1755,6 +1826,7 @@ test("virtual-root text retrieval and pre-download byte limits remain enforced",
   assert.equal(result.path, scenario.virtualPath);
   assert.equal(result.content, "hello");
   assert.equal(result.returnedBytes, bytes.byteLength);
+  assert.equal(pCloudCallCount("/listfolder"), 1);
   assert.equal(pCloudCallCount("/getfilelink"), 1);
   assert.equal(pCloudCallCount(CONTENT_PATH), 1);
   assert.ok(!JSON.stringify(result).includes(ROOT_PATH));
@@ -1901,6 +1973,7 @@ test("bounded image and Office content regressions preserve original bytes", asy
     metadata: {
       isfolder: false,
       name: "sample.png",
+      path: "/non-source/metadata-path",
       size: png.byteLength,
       contenttype: "image/png",
     },
@@ -1909,6 +1982,7 @@ test("bounded image and Office content regressions preserve original bytes", asy
   assert.equal(result.content[0].type, "image");
   assert.equal(result.content[0].mimeType, "image/png");
   assert.deepEqual(Buffer.from(result.content[0].data, "base64"), Buffer.from(png));
+  assert.equal(pCloudCallCount("/listfolder"), 1);
 
   const docx = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02]);
   setScenario({
@@ -1917,6 +1991,7 @@ test("bounded image and Office content regressions preserve original bytes", asy
     metadata: {
       isfolder: false,
       name: "sample.docx",
+      path: "/non-source/metadata-path",
       size: docx.byteLength,
       contenttype:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1932,4 +2007,5 @@ test("bounded image and Office content regressions preserve original bytes", asy
     Buffer.from(result.content[0].resource.blob, "base64"),
     Buffer.from(docx),
   );
+  assert.equal(pCloudCallCount("/listfolder"), 1);
 });
