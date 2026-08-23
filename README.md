@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication is on hold. Follow-up pCloud response and path-validation remediation passed production integration for the preceding candidate. Repeat independent review then identified an additional exact-path Unicode issue; the latest remediation is implemented, while production validation and repeat independent review of that revision remain pending. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
+> **Status:** v0.1 release candidate; publication is on hold. The latest pCloud response and exact-path remediation, including unpaired UTF-16 surrogate rejection, has passed production integration validation. The latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding has been corrected. The next gate is a final independent pre-publication audit followed by explicit release approval. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 

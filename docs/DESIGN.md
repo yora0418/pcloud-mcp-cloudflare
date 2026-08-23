@@ -262,7 +262,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. Follow-up pCloud response and path-validation remediation passed production integration for the preceding candidate. Repeat independent review then identified an additional exact-path Unicode issue; the latest remediation is implemented, while production validation and repeat independent review of that revision remain pending. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps after the release blockers are cleared.
+The repository remains private and publication is on hold. The latest pCloud response and exact-path remediation, including unpaired UTF-16 surrogate rejection, has passed production integration validation. The latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding has been corrected. The next gate is a final independent pre-publication audit followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
 
 ## License
 
@@ -358,7 +358,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — latest follow-up remediation implemented, validation pending
+#### Phase 8.4 — external audit remediation — follow-up remediation and production validation complete, final audit pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -368,8 +368,9 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - retain the existing embedded Office resource transport without adding standalone resource APIs
 - complete the initial external remediation and production integration validation
 - after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
-- validate that follow-up candidate in production, including exact paths with trailing spaces, then reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them
-- repeat production integration validation and independent review for the latest remediation before release approval; the earlier Git history / secret review passed, but publication remains blocked until the follow-up findings are cleared
+- reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them; the latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding was corrected
+- complete production integration validation for the latest remediation, including authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
+- require a final independent pre-publication audit and explicit release approval; the earlier Git history / secret review passed, but publication remains blocked until those final gates are complete
 
 ### Later
 
