@@ -10,6 +10,7 @@ export type CloudflareAccessPrincipal = {
 };
 
 const SHARED_VERIFIED_PRINCIPAL_KEY = "verified:shared";
+const JWKS_REQUEST_TIMEOUT_MS = 5_000;
 
 const CLOUDFLARE_ACCESS_HOST_PATTERN =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/;
@@ -61,6 +62,7 @@ function getJwks(teamDomain: string) {
   if (!jwks) {
     jwks = createRemoteJWKSet(
       new URL(`${teamDomain}/cdn-cgi/access/certs`),
+      { timeoutDuration: JWKS_REQUEST_TIMEOUT_MS },
     );
     jwksCache.set(teamDomain, jwks);
   }

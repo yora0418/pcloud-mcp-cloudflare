@@ -15,6 +15,7 @@ import {
 import {
   optionalPCloudId,
   optionalPCloudSize,
+  PCLOUD_ID_MAX_DECIMAL_DIGITS,
   safePCloudSizeNumber,
 } from "./pcloud-metadata";
 
@@ -79,6 +80,11 @@ const PCLOUD_GETFILELINK_JSON_MAX_BYTES = 64 * 1024;
 const SEARCH_MAX_SCANNED_ENTRIES = 10_000;
 const SEARCH_MAX_DEPTH = 64;
 const PCLOUD_PATH_MAX_BYTES = 16 * 1024;
+const OUTBOUND_URL_MAX_BYTES = 16 * 1024;
+const PCLOUD_FORM_BODY_MAX_BYTES = 64 * 1024;
+const PCLOUD_METADATA_TIMEOUT_MS = 10_000;
+const PCLOUD_GETFILELINK_TIMEOUT_MS = 10_000;
+const PCLOUD_CONTENT_TIMEOUT_MS = 30_000;
 const MCP_METADATA_RESULT_MAX_BYTES = 1024 * 1024;
 const SEARCH_MAX_PENDING_FOLDERS = 2_048;
 const SEARCH_MAX_PENDING_PATH_BYTES = 2 * 1024 * 1024;
@@ -370,6 +376,27 @@ function relativeSearchPath(basePath: string, fullPath: string): string {
   return fullPath;
 }
 
+function assertOutboundUrlByteLimit(url: URL, context: string): void {
+  if (utf8ByteLength(url.href) > OUTBOUND_URL_MAX_BYTES) {
+    throw new Error(
+      `${context} exceeded the ${OUTBOUND_URL_MAX_BYTES}-byte outbound URL safety limit.`,
+    );
+  }
+}
+
+function createBoundedFormBody(
+  params: Record<string, string>,
+  context: string,
+): URLSearchParams {
+  const body = new URLSearchParams(params);
+  if (utf8ByteLength(body.toString()) > PCLOUD_FORM_BODY_MAX_BYTES) {
+    throw new Error(
+      `${context} exceeded the ${PCLOUD_FORM_BODY_MAX_BYTES}-byte outbound parameter safety limit.`,
+    );
+  }
+  return body;
+}
+
 async function fetchPCloud(
   env: Env,
   method: string,
@@ -378,20 +405,26 @@ async function fetchPCloud(
 ): Promise<Response> {
   const { accessToken, apiHost } = getPCloudConfig(env);
   const url = new URL(`https://${apiHost}/${method}`);
-
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
+  assertOutboundUrlByteLimit(url, "pCloud request URL");
+  const body = createBoundedFormBody(params, "pCloud request parameters");
+  const signal = AbortSignal.timeout(PCLOUD_METADATA_TIMEOUT_MS);
 
   try {
     return await fetch(url, {
+      method: "POST",
       headers: {
         Accept: accept,
         Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/x-www-form-urlencoded",
       },
+      body,
       redirect: "manual",
+      signal,
     });
   } catch {
+    if (signal.aborted) {
+      throw new Error("pCloud metadata request timed out.");
+    }
     throw new Error("pCloud request failed before a response was received.");
   }
 }
@@ -493,6 +526,8 @@ function buildPCloudContentUrl(host: string, path: string): URL {
     throw new Error("pCloud getfilelink returned an invalid response.");
   }
 
+  assertOutboundUrlByteLimit(url, "pCloud content URL");
+
   return url;
 }
 
@@ -502,12 +537,17 @@ async function getPCloudFileContentUrl(
 ): Promise<URL> {
   const { accessToken, apiHost } = getPCloudConfig(env);
   const url = new URL(`https://${apiHost}/getfilelink`);
-  const body = new URLSearchParams({
-    path: physicalPath,
-    access_token: accessToken,
-    forcedownload: "1",
-    skipfilename: "1",
-  });
+  assertOutboundUrlByteLimit(url, "pCloud getfilelink URL");
+  const body = createBoundedFormBody(
+    {
+      path: physicalPath,
+      access_token: accessToken,
+      forcedownload: "1",
+      skipfilename: "1",
+    },
+    "pCloud getfilelink parameters",
+  );
+  const signal = AbortSignal.timeout(PCLOUD_GETFILELINK_TIMEOUT_MS);
 
   let response: Response;
   try {
@@ -519,8 +559,12 @@ async function getPCloudFileContentUrl(
       },
       body,
       redirect: "manual",
+      signal,
     });
   } catch {
+    if (signal.aborted) {
+      throw new Error("pCloud getfilelink request timed out.");
+    }
     throw new Error(
       "pCloud getfilelink request failed before a response was received.",
     );
@@ -559,12 +603,18 @@ async function getPCloudFileContentUrl(
 }
 
 async function fetchPCloudFileContent(url: URL): Promise<Response> {
+  assertOutboundUrlByteLimit(url, "pCloud content URL");
+  const signal = AbortSignal.timeout(PCLOUD_CONTENT_TIMEOUT_MS);
   try {
     return await fetch(url, {
       method: "GET",
       redirect: "manual",
+      signal,
     });
   } catch {
+    if (signal.aborted) {
+      throw new Error("pCloud content request timed out.");
+    }
     throw new Error(
       "pCloud content request failed before a response was received.",
     );
@@ -1024,9 +1074,9 @@ async function readResponseBytesWithinLimit(
   return bytes;
 }
 
-function getPCloudFolderContents(
+function getRawPCloudFolderContents(
   metadata: Record<string, unknown> | undefined,
-): PCloudFolderEntry[] {
+): unknown[] {
   if (
     !metadata ||
     metadata.isfolder !== true ||
@@ -1035,32 +1085,34 @@ function getPCloudFolderContents(
     throw new Error("pCloud listfolder returned invalid folder metadata.");
   }
 
-  return metadata.contents.map((entry): PCloudFolderEntry => {
-    if (!isRecord(entry) || typeof entry.isfolder !== "boolean") {
-      throw new Error("pCloud listfolder returned invalid entry metadata.");
-    }
+  return metadata.contents;
+}
 
-    const name = entry.name;
-    if (
-      typeof name !== "string" ||
-      name.length === 0 ||
-      name === "." ||
-      name === ".." ||
-      name.includes("/") ||
-      name.includes("\\") ||
-      /[\u0000-\u001f\u007f-\u009f]/.test(name) ||
-      hasUnpairedSurrogate(name) ||
-      new TextEncoder().encode(name).byteLength >= 1024
-    ) {
-      throw new Error("pCloud listfolder returned an invalid entry name.");
-    }
+function parsePCloudFolderEntry(entry: unknown): PCloudFolderEntry {
+  if (!isRecord(entry) || typeof entry.isfolder !== "boolean") {
+    throw new Error("pCloud listfolder returned invalid entry metadata.");
+  }
 
-    return {
-      metadata: entry,
-      name,
-      isFolder: entry.isfolder,
-    };
-  });
+  const name = entry.name;
+  if (
+    typeof name !== "string" ||
+    name.length === 0 ||
+    name === "." ||
+    name === ".." ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    /[\u0000-\u001f\u007f-\u009f]/.test(name) ||
+    hasUnpairedSurrogate(name) ||
+    new TextEncoder().encode(name).byteLength >= 1024
+  ) {
+    throw new Error("pCloud listfolder returned an invalid entry name.");
+  }
+
+  return {
+    metadata: entry,
+    name,
+    isFolder: entry.isfolder,
+  };
 }
 
 async function parseBoundedPCloudJson(
@@ -1199,20 +1251,24 @@ async function validatePCloudStatResponseTarget(
   const parentData = await callPCloudJson(env, "listfolder", {
     path: parentPath,
   });
-  const entries = getPCloudFolderContents(parentData.metadata);
+  const entries = getRawPCloudFolderContents(parentData.metadata);
   const statId = exactPCloudObjectId(metadata, isFolder);
-  const matchingEntries = entries.filter(
-    (entry) =>
-      entry.name === requestedName && entry.isFolder === isFolder,
-  );
+  let matchingEntry: PCloudFolderEntry | undefined;
+  let matchingEntryCount = 0;
+  for (const rawEntry of entries) {
+    const entry = parsePCloudFolderEntry(rawEntry);
+    if (entry.name === requestedName && entry.isFolder === isFolder) {
+      matchingEntry = entry;
+      matchingEntryCount += 1;
+    }
+  }
 
   if (
     statId === undefined ||
-    matchingEntries.length !== 1 ||
-    exactPCloudObjectId(
-      matchingEntries[0].metadata,
-      matchingEntries[0].isFolder,
-    ) !== statId
+    matchingEntryCount !== 1 ||
+    !matchingEntry ||
+    exactPCloudObjectId(matchingEntry.metadata, matchingEntry.isFolder) !==
+      statId
   ) {
     throw new Error("pCloud stat response did not match the requested target.");
   }
@@ -1292,6 +1348,7 @@ function createServer(env: Env) {
       inputSchema: {
         folderId: z
           .string()
+          .max(PCLOUD_ID_MAX_DECIMAL_DIGITS)
           .regex(/^(?:0|[1-9]\d*)$/)
           .optional()
           .describe(
@@ -1339,14 +1396,18 @@ function createServer(env: Env) {
 
         const data = await callPCloudJson(env, "listfolder", params);
         const folder = data.metadata;
-        const contents = getPCloudFolderContents(folder);
+        const contents = getRawPCloudFolderContents(folder);
         const limit = maxEntries ?? 200;
         const resultLimitError =
           `Folder listing exceeded the ${MCP_METADATA_RESULT_MAX_BYTES}-byte aggregate response safety limit; no complete folder listing was returned. Retry with a lower maxEntries.`;
         const entries: ReturnType<typeof compactPCloudEntry>[] = [];
         let resultBudgetBytes = 4 * 1024;
 
-        for (const entry of contents.slice(0, limit)) {
+        for (let entryIndex = 0; entryIndex < contents.length; entryIndex += 1) {
+          const entry = parsePCloudFolderEntry(contents[entryIndex]);
+          if (entryIndex >= limit) {
+            continue;
+          }
           let virtualEntryPath: string | undefined;
           if (requestedVirtualPath !== undefined) {
             try {
@@ -1508,15 +1569,17 @@ function createServer(env: Env) {
           const data = await callPCloudJson(env, "listfolder", {
             path: folder.physicalPath,
           });
-          const entries = getPCloudFolderContents(data.metadata);
+          const entries = getRawPCloudFolderContents(data.metadata);
 
-          for (const entry of entries) {
+          for (const rawEntry of entries) {
             scannedEntries += 1;
             if (scannedEntries > SEARCH_MAX_SCANNED_ENTRIES) {
               throw new Error(
                 `Search exceeded the ${SEARCH_MAX_SCANNED_ENTRIES}-entry safety limit; no complete search result was returned.`,
               );
             }
+
+            const entry = parsePCloudFolderEntry(rawEntry);
 
             const entryDepth = folder.depth + 1;
             if (entryDepth > SEARCH_MAX_DEPTH) {
@@ -1665,12 +1728,14 @@ function createServer(env: Env) {
           file.metadata,
           file.virtualPath,
         );
+        const resultLimitError =
+          `File metadata exceeded the ${MCP_METADATA_RESULT_MAX_BYTES}-byte aggregate response safety limit; no complete file metadata was returned.`;
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: stringifyBoundedMetadataResult(result, resultLimitError),
             },
           ],
         };

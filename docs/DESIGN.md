@@ -72,7 +72,7 @@ Cloudflare Managed OAuth is used so compatible non-browser MCP clients can authe
 
 After successful JWT verification, authenticated `/mcp` POST requests are rate-limited through the `MCP_RATE_LIMITER` Workers binding before request-body parsing or MCP SDK dispatch. The key uses a non-empty verified JWT `sub`, otherwise verified `common_name`, otherwise a shared conservative fallback. Email is not used. The default is 120 requests per 60 seconds per principal; Cloudflare rate limits are approximate and local to a Cloudflare location. Missing, invalid, or failed enforcement returns HTTP 503 rather than bypassing the boundary.
 
-MCP POST bodies pass through an application-level 256 KiB streaming limit before reaching the SDK. Canonical `Content-Length` values above the limit are rejected before buffering, but the Worker always counts streamed bytes and cancels on actual overflow. It reconstructs the Request from only the bounded bytes. GET, HEAD, and other bodyless endpoint behavior remains unchanged.
+MCP POST bodies pass through an application-level 256 KiB streaming limit before reaching the SDK. Canonical `Content-Length` values above the limit are rejected before buffering, but the Worker always counts streamed bytes and cancels on actual overflow. It reconstructs the Request from only the bounded bytes. A top-level JSON array is rejected before SDK dispatch because v0.1 does not support legacy JSON-RPC batches. GET, HEAD, and other bodyless endpoint behavior remains unchanged.
 
 ## Initial pCloud authentication model
 
@@ -91,7 +91,7 @@ The Worker uses:
 - `PCLOUD_API_HOST` as deployment configuration (`api.pcloud.com` for US or `eapi.pcloud.com` for EU)
 - optional `PCLOUD_ROOT_PATH` as the physical pCloud folder exposed as the MCP-visible `/`
 
-Every pCloud JSON API response is read within its method-specific byte limit and must be a JSON object with an explicit canonical `result` code. Metadata is consumed only after `result` has been validated as zero; a missing or malformed result fails closed rather than being treated as success. A successful path-based `listfolder` response must identify the exact requested folder path, while an unscoped ID-based listing must identify the exact canonical folder ID. For file `stat`, whose metadata `path` field is optional under the pCloud metadata contract, an exact returned path is accepted directly; otherwise the Worker binds the response to an exact path-based listing of the requested parent by matching the case-sensitive name, object type, and canonical file or folder ID. A target mismatch rejects the response before metadata is used.
+Every pCloud JSON API response is read within its method-specific byte limit and must be a JSON object with an explicit canonical `result` code. Metadata is consumed only after `result` has been validated as zero; a missing or malformed result fails closed rather than being treated as success. JSON method parameters use pCloud's supported POST form transport with Bearer authentication, a 64 KiB serialized-form bound, and no parameter-bearing API URL. Every final outbound URL is limited to 16 KiB after URL serialization. A successful path-based `listfolder` response must identify the exact requested folder path, while an unscoped ID-based listing must identify the exact canonical folder ID. Caller-supplied folder IDs are canonical decimal strings bounded to 128 digits; this is an explicit resource bound rather than an assumption that pCloud's wire contract is limited to JavaScript-safe integers. For file `stat`, whose metadata `path` field is optional under the pCloud metadata contract, an exact returned path is accepted directly; otherwise the Worker binds the response to an exact path-based listing of the requested parent by matching the case-sensitive name, object type, and canonical file or folder ID. A target mismatch rejects the response before metadata is used.
 
 ### Future possibility: shared OAuth application
 
@@ -165,7 +165,7 @@ Search file/folder metadata under a virtual path. The initial implementation is 
 
 pCloud's documented API does not expose a dedicated general filename search method. The implementation therefore calls `listfolder` without recursive mode for one folder at a time and traverses the tree iteratively in the Worker. Traversal is path-based: response-derived folder names are validated and joined beneath the already-resolved physical and virtual parent paths. Response-derived or caller-supplied folder IDs are not used, so traversal cannot bypass the configured virtual root through an ID.
 
-Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, retains at most 2,048 pending folders and a conservative 2 MiB storage budget for pending physical/virtual paths, and emits at most a 1 MiB serialized metadata result. The storage estimate uses the larger of UTF-8 bytes and JavaScript UTF-16 code-unit storage for each string, plus fixed per-folder overhead. Processed queue entries are released as traversal advances. It defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any aggregate, response, or traversal bound returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
+Every pCloud folder response is read through the existing 4 MiB streamed hard limit before strict UTF-8 decoding and JSON parsing, so a large tree is never buffered as one JSON document. The smaller `getfilelink` response retains its separate 64 KiB limit. `search_files` scans at most 10,000 entries, descends at most 64 levels, retains at most 2,048 pending folders and a conservative 2 MiB storage budget for pending physical/virtual paths, and emits at most a 1 MiB serialized metadata result. Folder entries are validated incrementally rather than mapped into a second complete array; the scan bound is checked before validating or allocating entry-derived data for an excess entry. The storage estimate uses the larger of UTF-8 bytes and JavaScript UTF-16 code-unit storage for each string, plus fixed per-folder overhead. Processed queue entries are released as traversal advances. It defaults to at most 45 folder/API calls. The optional `PCLOUD_SEARCH_MAX_FOLDER_CALLS` deployment variable accepts only a canonical integer from 1 to 1,024. The conservative default leaves headroom below the Workers Free external-subrequest ceiling; increasing it requires a Workers plan with sufficient per-request allowance. Exceeding any aggregate, response, or traversal bound returns an explicit error without partial search results and advises a narrower search path. A traversal that empties its folder queue exactly at the effective limit succeeds. Malformed JSON and JSON size overflow are reported separately without exposing response content.
 
 This is **not** full-text content search.
 
@@ -178,7 +178,7 @@ Possible future evolution:
 
 ### `get_file_info`
 
-Return normalized metadata for a specific virtual file path while enforcing the same virtual-root boundary. The tool is path-only, rejects folders, and may include bounded image, audio, or video metadata supplied by pCloud. It does not expose the physical pCloud path.
+Return normalized metadata for a specific virtual file path while enforcing the same virtual-root boundary. The tool is path-only, rejects folders, and may include bounded image, audio, or video metadata supplied by pCloud. It does not expose the physical pCloud path. Its complete serialized metadata result is limited to 1 MiB and fails without partial output on overflow.
 
 ### `read_file`
 
@@ -230,6 +230,8 @@ The [`getfilelink` response `path`](https://docs.pcloud.com/methods/streaming/ge
 
 pCloud metadata may contain 64-bit identifiers, hashes, and file sizes that exceed JavaScript's safe integer range. The Worker preserves exact decimal strings, converts only safe integer IDs to strings, and may recover file/folder IDs from pCloud's canonical string `id` field. It never exposes a rounded unsafe numeric ID, hash, or size. Content tools additionally require a size that can be represented as a safe non-negative integer before downloading bytes, so this correctness rule does not weaken their existing limits.
 
+Cloudflare Access JWKS retrieval has a 5-second application timeout. pCloud metadata and `getfilelink` calls have 10-second timeouts, while temporary content downloads have a 30-second timeout that also bounds body streaming. Timeout and stream failures use generic messages that do not expose credentials, physical paths, or temporary content URLs.
+
 Existing open-source pCloud MCP implementations may be used as references for pCloud-specific API behavior, but this project is a new Cloudflare Workers-oriented implementation rather than a fork of a server-based MCP implementation.
 
 ## Cloudflare design
@@ -269,7 +271,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. Additional audit remediation for unused MCP subscriptions, aggregate metadata budgets, upstream target binding, content-stream errors, observability, and supported Node.js lines is implemented. Production live regression and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
+The repository remains private and publication is on hold. Additional audit remediation, including legacy JSON-RPC batch rejection, bounded outbound pCloud requests, incremental search-entry validation, metadata result budgets, and application timeouts, is implemented. Production live regression of the current revision and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
 
 ## License
 
@@ -375,9 +377,10 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - retain the existing embedded Office resource transport without adding standalone resource APIs
 - complete the initial external remediation and production integration validation
 - after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
-- reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them; the latest independent review found no remaining P0, P1, or P2 findings, and its setup-documentation finding was corrected
+- reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them; the Unicode-focused repeat review found no remaining P0, P1, or P2 findings, and its setup-documentation finding was corrected
 - complete production integration validation for the latest remediation, including authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
 - explicitly disable unused MCP subscriptions; bind successful metadata responses to their requested target; bound aggregate paths, pending search work, and serialized metadata results; sanitize content-stream failures; and align observability and supported Node.js lines
+- reject legacy JSON-RPC batches before SDK dispatch; bound encoded outbound parameters and final URLs; validate search entries incrementally; apply a metadata result budget to `get_file_info`; and add explicit upstream request timeouts
 - require production live regression, a final independent pre-publication audit, and explicit release approval; the earlier Git history / secret review passed, but publication remains blocked until those final gates are complete
 
 ### Later

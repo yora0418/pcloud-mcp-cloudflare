@@ -2,7 +2,7 @@
 
 A serverless, read-only remote MCP server for pCloud, designed to run on Cloudflare Workers.
 
-> **Status:** v0.1 release candidate; publication is on hold. Additional audit remediation for unused MCP subscriptions, aggregate metadata budgets, upstream target binding, content-stream errors, observability, and supported Node.js lines is implemented. Production live regression and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
+> **Status:** v0.1 release candidate; publication is on hold. Additional audit remediation, including legacy JSON-RPC batch rejection, bounded outbound pCloud requests, incremental search-entry validation, metadata result budgets, and application timeouts, is implemented. Production live regression of the current revision and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed; the repository remains private, and no `v0.1.0` tag or GitHub Release has been created.
 
 For installation and deployment, see the [self-hosting setup guide](docs/SETUP.md). Review [SECURITY.md](SECURITY.md) before exposing pCloud content to an MCP client.
 
@@ -80,7 +80,7 @@ A production payload diagnostic measured the unfiltered recursive whole-tree res
 
 It does **not** search inside file contents.
 
-Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, 2,048 pending folders, a conservative 2 MiB retained-path storage budget, a 1 MiB serialized metadata result, and by default 45 folder listings. `list_folder` uses the same 1 MiB serialized-result budget. If an aggregate, response, or traversal safety limit is reached, the tool returns an explicit error instead of an incomplete result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
+Each folder response is independently limited to 4 MiB. A complete search is limited to 10,000 metadata entries, 64 nesting levels, 2,048 pending folders, a conservative 2 MiB retained-path storage budget, a 1 MiB serialized metadata result, and by default 45 folder listings. Entries are validated incrementally, and an entry beyond the scan limit is rejected before entry-derived paths or results are allocated. `list_folder` and `get_file_info` use the same 1 MiB serialized-result budget. If an aggregate, response, or traversal safety limit is reached, the tool returns an explicit error instead of an incomplete result. `maxResults` continues to limit only the number of matches returned after a complete bounded traversal. Large trees can be split into complete searches by supplying narrower `path` values. On a compatible Workers plan with sufficient external-subrequest allowance, `PCLOUD_SEARCH_MAX_FOLDER_CALLS` may raise the per-search folder-listing limit to at most 1,024.
 
 ## File metadata, text reading, image content, and Office content
 
@@ -98,7 +98,9 @@ Office bytes are carried as an embedded resource inside the tool result; the Wor
 
 ## Request safety limits
 
-Authenticated `/mcp` POST bodies are streamed through a 256 KiB (`262144` byte) gate before they reach the MCP SDK. Requests over the limit receive HTTP 413. The Worker also applies a Cloudflare Rate Limiting binding to authenticated MCP POST requests at 120 requests per 60 seconds per verified Access principal. The binding is a protective, location-local approximate limiter rather than an accounting mechanism; binding absence or failure causes MCP POST requests to fail closed with HTTP 503.
+Authenticated `/mcp` POST bodies are streamed through a 256 KiB (`262144` byte) gate before they reach the MCP SDK. Requests over the limit receive HTTP 413. Top-level JSON arrays are rejected at this gate because v0.1 does not support legacy JSON-RPC batch dispatch. The Worker also applies a Cloudflare Rate Limiting binding to authenticated MCP POST requests at 120 requests per 60 seconds per verified Access principal. The binding is a protective, location-local approximate limiter rather than an accounting mechanism; binding absence or failure causes MCP POST requests to fail closed with HTTP 503.
+
+pCloud JSON method parameters are sent in bounded POST form bodies rather than URL queries. Final outbound URLs are limited to 16 KiB after serialization, form parameters to 64 KiB, and caller-supplied unscoped folder IDs to canonical decimal strings of at most 128 digits. The Worker applies explicit timeouts to Cloudflare Access JWKS retrieval, pCloud metadata and `getfilelink` requests, and temporary content downloads. All pCloud redirects remain manual.
 
 The v0.1 server does not publish events or use MCP subscriptions. The SDK's `subscriptions/listen` capacity is explicitly set to zero, so a listen request is rejected without opening a long-lived SSE stream. This does not change the seven registered tools.
 

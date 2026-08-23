@@ -81,6 +81,8 @@ For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data t
 
 The default search limit leaves headroom below the Workers Free external-subrequest ceiling. Prefer narrower `search_files` paths for large trees. Increase `PCLOUD_SEARCH_MAX_FOLDER_CALLS` only when the selected Workers plan provides enough per-request external-subrequest allowance; malformed or out-of-range values make searches fail closed.
 
+The Worker sends bounded pCloud JSON parameters in POST form bodies, rejects final outbound URLs over 16 KiB, and applies explicit timeouts to Access JWKS, pCloud metadata/link, and content requests. Unscoped `list_folder` accepts only canonical decimal folder IDs of at most 128 digits. These are application safety bounds; no additional deployment variable is required.
+
 You can enter the pCloud token interactively without placing it on a command line:
 
 ```powershell

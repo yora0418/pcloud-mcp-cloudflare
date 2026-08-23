@@ -17,6 +17,9 @@ const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const SEARCH_DEFAULT_MAX_FOLDER_API_CALLS = 45;
 const PCLOUD_PATH_MAX_BYTES = 16 * 1024;
+const OUTBOUND_URL_MAX_BYTES = 16 * 1024;
+const PCLOUD_FORM_BODY_MAX_BYTES = 64 * 1024;
+const PCLOUD_ID_MAX_DECIMAL_DIGITS = 128;
 const MCP_METADATA_RESULT_MAX_BYTES = 1024 * 1024;
 const SEARCH_MAX_PENDING_FOLDERS = 2_048;
 const SEARCH_MAX_PENDING_PATH_BYTES = 2 * 1024 * 1024;
@@ -228,7 +231,11 @@ before(async () => {
   globalThis.fetch = async (input, init = {}) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
-    fetchCalls.push({ request, url });
+    const fetchCall = { request, url };
+    fetchCalls.push(fetchCall);
+    if (request.signal.aborted) {
+      throw request.signal.reason;
+    }
 
     if (
       url.origin === TEAM_DOMAIN &&
@@ -238,15 +245,22 @@ before(async () => {
     }
 
     if (url.hostname === "api.pcloud.com" && url.pathname === "/stat") {
-      assert.equal(request.method, "GET");
+      assert.equal(request.method, "POST");
+      assert.equal(url.search, "");
       assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
       assert.equal(
-        url.searchParams.get("path"),
+        request.headers.get("content-type"),
+        "application/x-www-form-urlencoded",
+      );
+      const form = new URLSearchParams(await request.clone().text());
+      fetchCall.form = form;
+      assert.equal(
+        form.get("path"),
         scenario.physicalPath,
       );
       if (scenario.statResponseFactory) {
-        return scenario.statResponseFactory();
+        return scenario.statResponseFactory({ request, form, url });
       }
       return jsonResponse({ result: 0, metadata: scenario.metadata });
     }
@@ -255,11 +269,18 @@ before(async () => {
       url.hostname === "api.pcloud.com" &&
       url.pathname === "/listfolder"
     ) {
-      assert.equal(request.method, "GET");
+      assert.equal(request.method, "POST");
+      assert.equal(url.search, "");
       assert.equal(request.redirect, "manual");
       assert.equal(request.headers.get("authorization"), `Bearer ${ACCESS_TOKEN}`);
-      const requestedPath = url.searchParams.get("path");
-      const requestedFolderId = url.searchParams.get("folderid");
+      assert.equal(
+        request.headers.get("content-type"),
+        "application/x-www-form-urlencoded",
+      );
+      const form = new URLSearchParams(await request.clone().text());
+      fetchCall.form = form;
+      const requestedPath = form.get("path");
+      const requestedFolderId = form.get("folderid");
       if (requestedFolderId === null) {
         assert.ok(
           requestedPath === scenario.rootPath ||
@@ -269,9 +290,15 @@ before(async () => {
         assert.equal(requestedPath, null);
         assert.match(requestedFolderId, /^\d+$/);
       }
-      assert.equal(url.searchParams.get("recursive"), null);
+      assert.equal(form.get("recursive"), null);
       if (scenario.listResponseFactory) {
-        return scenario.listResponseFactory({ request, requestedPath, url });
+        return scenario.listResponseFactory({
+          request,
+          requestedPath,
+          requestedFolderId,
+          form,
+          url,
+        });
       }
       const metadata =
         scenario.listMetadataByPath?.[requestedPath] ??
@@ -305,6 +332,7 @@ before(async () => {
       assert.equal(url.search, "");
       assert.equal(request.redirect, "manual");
       const form = new URLSearchParams(await request.text());
+      fetchCall.form = form;
       assert.equal(
         form.get("path"),
         scenario.physicalPath,
@@ -740,6 +768,30 @@ test("metadata tools never expose rounded 64-bit identifiers or sizes", async ()
   assert.equal("hash" in info, false);
 });
 
+test("legacy JSON-RPC batches are rejected before SDK or pCloud dispatch", async () => {
+  setScenario();
+  const response = await sendMcpRequest(
+    JSON.stringify([
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "get_file_info", arguments: { path: "/secret" } },
+      },
+    ]),
+  );
+  assert.equal(response.status, 400);
+  assert.equal(
+    await response.text(),
+    "JSON-RPC batch requests are not supported.",
+  );
+  assert.equal(pCloudCallCount("/stat"), 0);
+  assert.equal(pCloudCallCount("/listfolder"), 0);
+
+  const tools = (await rpc("tools/list", {})).result.tools;
+  assert.equal(tools.length, 7);
+});
+
 test("pCloud JSON calls require an explicit canonical result code", async () => {
   const metadata = {
     isfolder: false,
@@ -1019,7 +1071,7 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
   assert.equal(info.path, "/Documents/report.md ");
   const statRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
   assert.equal(
-    statRequest.url.searchParams.get("path"),
+    statRequest.form.get("path"),
     "/Scoped /Documents/report.md ",
   );
 
@@ -1044,7 +1096,7 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
   assert.equal(text.content, "hello");
   const readStatRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
   assert.equal(
-    readStatRequest.url.searchParams.get("path"),
+    readStatRequest.form.get("path"),
     `${ROOT_PATH}/ Text / note.md `,
   );
 
@@ -1069,7 +1121,7 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
     ({ url }) => url.pathname === "/stat",
   );
   assert.equal(
-    imageStatRequest.url.searchParams.get("path"),
+    imageStatRequest.form.get("path"),
     `${ROOT_PATH}/ Images /sample.png `,
   );
   assert.equal(pCloudCallCount("/getfilelink"), 1);
@@ -1098,7 +1150,7 @@ test("virtual paths preserve spaces exactly and reject unsupported inputs", asyn
     ({ url }) => url.pathname === "/stat",
   );
   assert.equal(
-    officeStatRequest.url.searchParams.get("path"),
+    officeStatRequest.form.get("path"),
     `${ROOT_PATH}/ Office /sample.docx `,
   );
   assert.equal(pCloudCallCount("/getfilelink"), 0);
@@ -1259,7 +1311,7 @@ test("unpaired surrogates fail closed across exact pCloud path boundaries", asyn
   assert.equal(pairedResult.path, pairedPath);
   const statRequest = fetchCalls.find(({ url }) => url.pathname === "/stat");
   assert.equal(
-    statRequest.url.searchParams.get("path"),
+    statRequest.form.get("path"),
     `${ROOT_PATH}${pairedPath}`,
   );
   assert.equal(pCloudCallCount("/stat"), 1);
@@ -1466,13 +1518,13 @@ test("search uses non-recursive folder listings and completes traversal after ma
   assert.equal(
     fetchCalls
       .filter(({ url }) => url.pathname === "/listfolder")
-      .some(({ url }) => url.searchParams.has("recursive")),
+      .some(({ form }) => form?.has("recursive")),
     false,
   );
   assert.equal(
     fetchCalls
       .filter(({ url }) => url.pathname === "/listfolder")
-      .some(({ url }) => url.searchParams.has("folderid")),
+      .some(({ form }) => form?.has("folderid")),
     false,
   );
 
@@ -1503,11 +1555,14 @@ test("search rejects scanned-entry and depth overflow without partial results", 
   setScenario({
     listMetadata: {
       isfolder: true,
-      contents: Array.from({ length: 10_001 }, (_, index) => ({
-        isfolder: false,
-        name: `entry-${index}.txt`,
-        size: 1,
-      })),
+      contents: [
+        ...Array.from({ length: 10_000 }, (_, index) => ({
+          isfolder: false,
+          name: `entry-${index}.txt`,
+          size: 1,
+        })),
+        { isfolder: false, name: "invalid/entry" },
+      ],
     },
   });
   let errorResult = await callTool("search_files", {
@@ -1543,6 +1598,130 @@ test("search rejects scanned-entry and depth overflow without partial results", 
   assert.equal(pCloudCallCount("/listfolder"), 65);
 });
 
+test("pCloud metadata, getfilelink, and content requests have application timeouts", async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const nonAbortingSignal = () => new AbortController().signal;
+  try {
+    AbortSignal.timeout = () => AbortSignal.abort(new DOMException("timeout", "TimeoutError"));
+    setScenario();
+    let result = await callTool("get_file_info", { path: scenario.virtualPath });
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, "pCloud metadata request timed out.");
+    assert.equal(pCloudCallCount("/stat"), 1);
+
+    let tenSecondSignals = 0;
+    AbortSignal.timeout = (milliseconds) => {
+      if (milliseconds === 10_000) {
+        tenSecondSignals += 1;
+        return tenSecondSignals === 1
+          ? nonAbortingSignal()
+          : AbortSignal.abort(new DOMException("timeout", "TimeoutError"));
+      }
+      return nonAbortingSignal();
+    };
+    setScenario();
+    scenario.metadata.path = scenario.physicalPath;
+    result = await callTool("read_file", { path: scenario.virtualPath });
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, "pCloud getfilelink request timed out.");
+    assert.equal(pCloudCallCount("/getfilelink"), 1);
+
+    AbortSignal.timeout = (milliseconds) =>
+      milliseconds === 30_000
+        ? AbortSignal.abort(new DOMException("timeout", "TimeoutError"))
+        : nonAbortingSignal();
+    setScenario();
+    scenario.metadata.path = scenario.physicalPath;
+    result = await callTool("read_file", { path: scenario.virtualPath });
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, "pCloud content request timed out.");
+    assert.equal(
+      fetchCalls.filter(({ url }) => url.hostname === CONTENT_HOST).length,
+      1,
+    );
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test("outbound pCloud requests bound encoded forms, IDs, and content URLs", async () => {
+  const multibyteSegment = "あ".repeat(333);
+  const multibytePath = `/${Array.from({ length: 16 }, () => multibyteSegment).join("/")}`;
+  setScenario({
+    virtualPath: multibytePath,
+    metadata: {
+      isfolder: false,
+      name: multibyteSegment,
+      path: `${ROOT_PATH}${multibytePath}`,
+      fileid: "42",
+      size: 1,
+      contenttype: "text/plain",
+    },
+  });
+  let result = await callTool("get_file_info", { path: multibytePath });
+  assert.equal(result.isError, undefined);
+  const statCall = fetchCalls.find(({ url }) => url.pathname === "/stat");
+  assert.ok(statCall);
+  assert.equal(statCall.request.method, "POST");
+  assert.equal(statCall.url.search, "");
+  assert.equal(statCall.form.get("path"), `${ROOT_PATH}${multibytePath}`);
+  assert.ok(new TextEncoder().encode(statCall.url.href).byteLength < OUTBOUND_URL_MAX_BYTES);
+  const encodedFormBytes = new TextEncoder().encode(statCall.form.toString()).byteLength;
+  assert.ok(encodedFormBytes > OUTBOUND_URL_MAX_BYTES);
+  assert.ok(encodedFormBytes < PCLOUD_FORM_BODY_MAX_BYTES);
+
+  const acceptedFolderId = "9".repeat(PCLOUD_ID_MAX_DECIMAL_DIGITS);
+  setScenario({
+    rootPath: "/",
+    listMetadata: { isfolder: true, contents: [] },
+  });
+  result = await callTool(
+    "list_folder",
+    { folderId: acceptedFolderId },
+    { PCLOUD_ROOT_PATH: "/" },
+  );
+  assert.equal(result.isError, undefined);
+  const folderCall = fetchCalls.find(({ url }) => url.pathname === "/listfolder");
+  assert.equal(folderCall.form.get("folderid"), acceptedFolderId);
+
+  setScenario({ rootPath: "/" });
+  result = await callTool(
+    "list_folder",
+    { folderId: "9".repeat(PCLOUD_ID_MAX_DECIMAL_DIGITS + 1) },
+    { PCLOUD_ROOT_PATH: "/" },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(pCloudCallCount("/listfolder"), 0);
+
+  const bytes = new TextEncoder().encode("hello");
+  setScenario({
+    virtualPath: "/Documents/note.md",
+    bytes,
+    metadata: {
+      isfolder: false,
+      name: "note.md",
+      path: `${ROOT_PATH}/Documents/note.md`,
+      fileid: "42",
+      size: bytes.byteLength,
+      contenttype: "text/markdown",
+    },
+    getfilelinkResponseFactory() {
+      return jsonResponse({
+        result: 0,
+        hosts: [CONTENT_HOST],
+        path: `/${"x".repeat(OUTBOUND_URL_MAX_BYTES)}`,
+      });
+    },
+  });
+  result = await callTool("read_file", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /outbound URL safety limit/);
+  assert.equal(
+    fetchCalls.filter(({ url }) => url.hostname === CONTENT_HOST).length,
+    0,
+  );
+});
+
 test("aggregate path, queue, and result budgets fail closed before amplification", async () => {
   const overlongPath = `/${Array.from({ length: 17 }, () => "p".repeat(1000)).join("/")}`;
   setScenario();
@@ -1550,6 +1729,25 @@ test("aggregate path, queue, and result budgets fail closed before amplification
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /16384-byte path safety limit/);
   assert.equal(pCloudCallCount("/stat"), 0);
+
+  const metadataCanary = `METADATA_CANARY_${"m".repeat(MCP_METADATA_RESULT_MAX_BYTES)}`;
+  setScenario({
+    virtualPath: "/Documents/large-metadata.txt",
+    metadata: {
+      isfolder: false,
+      name: "large-metadata.txt",
+      path: `${ROOT_PATH}/Documents/large-metadata.txt`,
+      fileid: "42",
+      size: 1,
+      contenttype: metadataCanary,
+    },
+  });
+  result = await callTool("get_file_info", { path: scenario.virtualPath });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /file metadata/i);
+  assert.match(result.content[0].text, /aggregate response safety limit/);
+  assert.ok(!JSON.stringify(result).includes("METADATA_CANARY"));
+  assert.equal(pCloudCallCount("/stat"), 1);
 
   const longListEntries = Array.from({ length: 500 }, (_, index) => {
     const prefix = `${String(index).padStart(4, "0")}-`;
