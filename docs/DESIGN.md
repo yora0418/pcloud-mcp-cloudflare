@@ -271,7 +271,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. Additional audit remediation, including legacy JSON-RPC batch rejection, bounded outbound pCloud requests, incremental search-entry validation, metadata result budgets, and application timeouts, is implemented. Production live regression of the current revision and the final independent pre-publication audit remain pending, followed by explicit release approval. The earlier Git history / secret review passed. Publication, tagging, and the first GitHub Release remain separate release steps.
+The repository remains private and publication is on hold. Production regression and the focused independent re-audit of the current remediation passed with no P0, P1, or P2 findings and no code or security release blocker. The two remaining P3 follow-ups are non-blocking. Publication remains pending post-merge `main` verification, the final pre-publication gate, and explicit release approval. Publication, tagging, and the first GitHub Release remain separate release steps.
 
 ## License
 
@@ -367,7 +367,7 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - add credential-free CI for tests, type checking, and a Wrangler deployment dry run
 - keep repository publication, tags, and GitHub Releases pending explicit final release approval
 
-#### Phase 8.4 — external audit remediation — additional remediation implemented, production revalidation and final audit pending
+#### Phase 8.4 — external audit remediation — implementation and focused re-audit complete; public release gates pending
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -382,9 +382,11 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - explicitly disable unused MCP subscriptions; bind successful metadata responses to their requested target; bound aggregate paths, pending search work, and serialized metadata results; sanitize content-stream failures; and align observability and supported Node.js lines
 - reject legacy JSON-RPC batches before SDK dispatch; bound encoded outbound parameters and final URLs; validate search entries incrementally; apply a metadata result budget to `get_file_info`; and add explicit upstream request timeouts
 - cap cumulative pCloud folder-listing JSON at 16 MiB per search, apply a 45-second tool deadline with client-abort propagation, and enforce the low-severity dependency audit in CI
-- require production live regression, a final independent pre-publication audit, and explicit release approval; the earlier Git history / secret review passed, but publication remains blocked until those final gates are complete
+- complete production regression and a focused independent re-audit with no P0, P1, or P2 findings; retain two non-blocking P3 follow-ups without treating them as v0.1 release blockers
+- require post-merge `main` verification, the final pre-publication gate, and explicit release approval before publication
 
 ### Later
 
 - indexing/caching only if real usage shows it is needed
 - investigate shared OAuth only if onboarding friction becomes worth solving
+- strengthen client-abort regression coverage against a more production-like Workers runtime after v0.1
