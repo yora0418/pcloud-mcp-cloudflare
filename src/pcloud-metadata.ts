@@ -3,9 +3,12 @@ export type PublicPCloudSize = number | string;
 type PCloudIdPrefix = "d" | "f";
 
 const UNSIGNED_DECIMAL_PATTERN = /^(?:0|[1-9]\d*)$/;
+export const PCLOUD_ID_MAX_DECIMAL_DIGITS = 128;
 
 function exactUnsignedDecimal(value: unknown): string | undefined {
-  return typeof value === "string" && UNSIGNED_DECIMAL_PATTERN.test(value)
+  return typeof value === "string" &&
+    value.length <= PCLOUD_ID_MAX_DECIMAL_DIGITS &&
+    UNSIGNED_DECIMAL_PATTERN.test(value)
     ? value
     : undefined;
 }

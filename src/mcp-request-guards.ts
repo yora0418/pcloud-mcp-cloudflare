@@ -16,6 +16,31 @@ export class McpRequestBodyError extends Error {
   }
 }
 
+function isJsonWhitespace(byte: number): boolean {
+  return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
+}
+
+function rejectJsonRpcBatch(bytes: Uint8Array): void {
+  let offset =
+    bytes.length >= 3 &&
+    bytes[0] === 0xef &&
+    bytes[1] === 0xbb &&
+    bytes[2] === 0xbf
+      ? 3
+      : 0;
+
+  while (offset < bytes.length && isJsonWhitespace(bytes[offset])) {
+    offset += 1;
+  }
+
+  if (bytes[offset] === 0x5b) {
+    throw new McpRequestBodyError(
+      400,
+      "JSON-RPC batch requests are not supported.",
+    );
+  }
+}
+
 function parseContentLength(value: string): number {
   if (!/^(?:0|[1-9]\d*)$/.test(value)) {
     throw new McpRequestBodyError(400, "Invalid Content-Length header.");
@@ -98,6 +123,8 @@ export async function createBoundedMcpRequest(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+
+  rejectJsonRpcBatch(bytes);
 
   const headers = new Headers(request.headers);
   headers.delete("content-length");

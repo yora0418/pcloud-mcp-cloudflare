@@ -6,7 +6,7 @@ External dashboards and client capabilities change over time. Use the linked ven
 
 ## Prerequisites
 
-- Node.js 22.18.0 or later on a supported release line (`^22.18.0 || >=24.11.0`) and a compatible npm release. CI validates the exact 22.18.0 minimum; no exact npm version is required. Dependency versions are recorded in `package-lock.json`.
+- Node.js on a supported LTS line (`^22.18.0 || ^24.11.0`) and a compatible npm release. CI validates the exact 22.18.0 and 24.11.0 minimums; no exact npm version is required. Dependency versions are recorded in `package-lock.json`.
 - A Cloudflare account with Workers and a Cloudflare Zero Trust organization with an identity provider.
 - A pCloud account and a pCloud application registered through [pCloud My Apps](https://docs.pcloud.com/my_apps/).
 - An MCP client that can connect to a remote HTTP MCP server and complete OAuth. For ChatGPT, confirm that your plan and workspace allow custom MCP apps and developer mode in the [current OpenAI documentation](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta).
@@ -77,9 +77,11 @@ Configure the following under the Worker's **Settings > Variables and Secrets**.
 | `PCLOUD_SEARCH_MAX_FOLDER_CALLS` | Variable | Optional canonical integer from `1` to `1024`; defaults to `45` complete-search folder listings |
 | `PCLOUD_ACCESS_TOKEN` | Secret | The pCloud OAuth access token |
 
-For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data the connected client may receive. Do not use `.` or `..` path segments. Read-only behavior prevents file mutation but does not prevent disclosure of readable content.
+For example, set `PCLOUD_ROOT_PATH` to a dedicated folder containing only data the connected client may receive. The value is used exactly as supplied, including spaces in filename segments; do not add formatting whitespace. Empty segments, `.` or `..` segments, backslashes, control characters, unpaired UTF-16 surrogates, segments of 1,024 UTF-8 bytes or more, and complete paths over 16 KiB are rejected. Read-only behavior prevents file mutation but does not prevent disclosure of readable content.
 
 The default search limit leaves headroom below the Workers Free external-subrequest ceiling. Prefer narrower `search_files` paths for large trees. Increase `PCLOUD_SEARCH_MAX_FOLDER_CALLS` only when the selected Workers plan provides enough per-request external-subrequest allowance; malformed or out-of-range values make searches fail closed.
+
+The Worker sends bounded pCloud JSON parameters in POST form bodies, rejects final outbound URLs over 16 KiB, and applies explicit timeouts to Access JWKS, pCloud metadata/link, and content requests. Tool invocations have a fixed 45-second overall deadline and propagate client disconnects to pCloud work. `search_files` also has a fixed 16 MiB aggregate folder-listing JSON budget that does not grow with `PCLOUD_SEARCH_MAX_FOLDER_CALLS`. Unscoped `list_folder` accepts only canonical decimal folder IDs of at most 128 digits. These are application safety bounds; no additional deployment variable is required.
 
 You can enter the pCloud token interactively without placing it on a command line:
 
@@ -88,6 +90,8 @@ npx.cmd wrangler secret put PCLOUD_ACCESS_TOKEN
 ```
 
 The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables and secrets.
+
+It also enables invocation logs at full sampling and explicitly disables Workers Traces. Keep application logs generic and never log credentials, physical pCloud paths, temporary content URLs, filenames, or file content. Before enabling traces or additional telemetry, review whether automatically captured outbound-request metadata and the selected retention/access policy are appropriate for the exposed pCloud subtree.
 
 It also defines the non-secret `MCP_RATE_LIMITER` binding with a default of 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Its `namespace_id` is a positive-integer string required by Cloudflare. If namespace `1001` is already used by another rate-limit binding in the same Cloudflare account, select a different unused positive integer before the first deployment; bindings sharing a namespace also share counters for matching keys. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
 

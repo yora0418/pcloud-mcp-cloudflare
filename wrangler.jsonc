@@ -3,7 +3,7 @@
   "name": "pcloud-mcp-cloudflare",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-17",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "keep_vars": true,
   "preview_urls": false,
   "ratelimits": [
@@ -18,6 +18,13 @@
   ],
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": false
+    }
   }
 }

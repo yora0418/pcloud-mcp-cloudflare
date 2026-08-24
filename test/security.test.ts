@@ -155,6 +155,32 @@ test("MCP ingress accepts bounded bodies and reconstructs the request", async ()
   }
 });
 
+test("MCP ingress rejects JSON-RPC batches before dispatch", async () => {
+  for (const body of [
+    "[]",
+    " \r\n\t[{}]",
+    new Uint8Array([0xef, 0xbb, 0xbf, 0x20, 0x5b, 0x5d]),
+  ]) {
+    let dispatchCount = 0;
+    await assert.rejects(
+      dispatchBoundedMcpRequest(
+        new Request("https://worker.example/mcp", {
+          method: "POST",
+          body,
+        }),
+        () => {
+          dispatchCount += 1;
+        },
+      ),
+      (error: unknown) =>
+        error instanceof McpRequestBodyError &&
+        error.status === 400 &&
+        error.message === "JSON-RPC batch requests are not supported.",
+    );
+    assert.equal(dispatchCount, 0);
+  }
+});
+
 test("MCP ingress rejects declared oversized or malformed lengths before dispatch", async () => {
   for (const contentLength of [
     String(MCP_REQUEST_MAX_BYTES + 1),
