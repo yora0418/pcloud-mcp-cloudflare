@@ -396,6 +396,22 @@ function relativeSearchPath(basePath: string, fullPath: string): string {
   return fullPath;
 }
 
+function validateSearchQuery(value: string): string {
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(value)) {
+    throw new Error("query contains an unsupported control character.");
+  }
+
+  if (hasUnpairedSurrogate(value)) {
+    throw new Error("query contains an unsupported Unicode sequence.");
+  }
+
+  if (/^\s*$/u.test(value)) {
+    throw new Error("query must contain at least one non-whitespace character.");
+  }
+
+  return value;
+}
+
 function assertOutboundUrlByteLimit(url: URL, context: string): void {
   if (utf8ByteLength(url.href) > OUTBOUND_URL_MAX_BYTES) {
     throw new Error(
@@ -1682,16 +1698,13 @@ function createServer(env: Env, context: ToolInvocationContext) {
     },
     async ({ query, path, includeFolders, maxResults }) => {
       try {
-        const needle = query.trim();
-        if (!needle) {
-          throw new Error("query must contain at least one non-whitespace character.");
-        }
+        const needle = validateSearchQuery(query);
 
         const resolved = resolveVirtualPath(env, path);
         const maxFolderApiCalls = getPCloudSearchMaxFolderCalls(
           env.PCLOUD_SEARCH_MAX_FOLDER_CALLS,
         );
-        const lowerNeedle = needle.toLocaleLowerCase();
+        const lowerNeedle = needle.toLowerCase();
         const returnFolders = includeFolders ?? true;
         const limit = maxResults ?? 50;
         const resultLimitError =
@@ -1784,8 +1797,9 @@ function createServer(env: Env, context: ToolInvocationContext) {
               resolved.virtualPath,
               virtualPath,
             );
-            const searchable = `${name}\n${relativePath}`.toLocaleLowerCase();
-            const matchesQuery = searchable.includes(lowerNeedle);
+            const matchesQuery =
+              name.toLowerCase().includes(lowerNeedle) ||
+              relativePath.toLowerCase().includes(lowerNeedle);
 
             if (matchesQuery && (returnFolders || !isFolder)) {
               totalMatches += 1;
@@ -2258,6 +2272,7 @@ export default {
     env: Env,
     ctx: McpExecutionContext,
   ): Promise<Response> {
+    const invocationContext = createToolInvocationContext(request.signal);
     const principal = await verifyCloudflareAccess(request, env);
     if (!principal) {
       return new Response("Forbidden", {
@@ -2294,15 +2309,13 @@ export default {
           return await dispatchBoundedMcpRequest(
             request,
             (guardedRequest) => {
-              const invocationContext = createToolInvocationContext(
-                request.signal,
-              );
               const mcpHandler = createConfiguredMcpHandler(
                 env,
                 invocationContext,
               );
               return mcpHandler(guardedRequest, env, ctx);
             },
+            { deadlineAt: invocationContext.deadlineAt },
           );
         } catch (error) {
           if (error instanceof McpRequestBodyError) {
@@ -2317,7 +2330,7 @@ export default {
 
       const mcpHandler = createConfiguredMcpHandler(
         env,
-        createToolInvocationContext(request.signal),
+        invocationContext,
       );
       return mcpHandler(request, env, ctx);
     }

@@ -646,6 +646,40 @@ test("MCP ingress accepts bounded Content-Length and lengthless requests", async
   assert.equal(response.status, 200, await response.text());
 });
 
+test("MCP ingress returns a generic deadline error for an incomplete body", async () => {
+  const originalTimeout = AbortSignal.timeout;
+  const privateTimeoutReason =
+    "private timeout reason with https://temporary.example/physical/path";
+  let cancelCount = 0;
+  try {
+    AbortSignal.timeout = (milliseconds) =>
+      milliseconds > 40_000
+        ? AbortSignal.abort(new Error(privateTimeoutReason))
+        : new AbortController().signal;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{"));
+      },
+      cancel() {
+        cancelCount += 1;
+      },
+    });
+
+    const response = await sendMcpRequest(body);
+    const responseText = await response.text();
+    assert.equal(response.status, 408);
+    assert.equal(
+      responseText,
+      "MCP request was canceled or exceeded its deadline.",
+    );
+    assert.ok(!responseText.includes(privateTimeoutReason));
+    assert.ok(!responseText.includes("temporary.example"));
+    assert.equal(cancelCount, 1);
+  } finally {
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
 test("authenticated bodyless GET and HEAD requests bypass POST-only guards", async () => {
   setScenario();
   let response = await worker.fetch(
@@ -1560,6 +1594,79 @@ test("search uses non-recursive folder listings and completes traversal after ma
   );
 });
 
+test("search preserves exact query identity and matches names and paths separately", async () => {
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [
+        { isfolder: false, name: "foo", size: 1 },
+        { isfolder: false, name: "foo ", size: 1 },
+      ],
+    },
+  });
+  let result = parseToolText(
+    await callTool("search_files", { query: "foo ", path: "/" }),
+  );
+  assert.equal(result.query, "foo ");
+  assert.equal(result.totalMatches, 1);
+  assert.equal(result.matches[0].name, "foo ");
+
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [
+        { isfolder: false, name: " Leading and trailing ", size: 1 },
+      ],
+    },
+  });
+  result = parseToolText(
+    await callTool("search_files", {
+      query: " leading and trailing ",
+      path: "/",
+    }),
+  );
+  assert.equal(result.query, " leading and trailing ");
+  assert.equal(result.totalMatches, 1);
+  assert.equal(result.matches[0].name, " Leading and trailing ");
+
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [{ isfolder: false, name: "foo", size: 1 }],
+    },
+  });
+  let errorResult = await callTool("search_files", {
+    query: "foo\n/foo",
+    path: "/",
+  });
+  assert.equal(errorResult.isError, true);
+  assert.equal(
+    errorResult.content[0].text,
+    "query contains an unsupported control character.",
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 0);
+
+  for (const query of ["   ", "\uD800"]) {
+    setScenario();
+    errorResult = await callTool("search_files", { query, path: "/" });
+    assert.equal(errorResult.isError, true);
+    assert.equal(pCloudCallCount("/listfolder"), 0);
+  }
+
+  setScenario({
+    listMetadata: {
+      isfolder: true,
+      contents: [{ isfolder: false, name: "CaseName.TXT", size: 1 }],
+    },
+  });
+  result = parseToolText(
+    await callTool("search_files", { query: "casename.txt", path: "/" }),
+  );
+  assert.equal(result.query, "casename.txt");
+  assert.equal(result.totalMatches, 1);
+  assert.equal(result.matches[0].name, "CaseName.TXT");
+});
+
 test("search rejects scanned-entry and depth overflow without partial results", async () => {
   setScenario({
     listMetadata: {
@@ -1611,7 +1718,10 @@ test("pCloud metadata, getfilelink, and content requests have application timeou
   const originalTimeout = AbortSignal.timeout;
   const nonAbortingSignal = () => new AbortController().signal;
   try {
-    AbortSignal.timeout = () => AbortSignal.abort(new DOMException("timeout", "TimeoutError"));
+    AbortSignal.timeout = (milliseconds) =>
+      milliseconds === 10_000
+        ? AbortSignal.abort(new DOMException("timeout", "TimeoutError"))
+        : nonAbortingSignal();
     setScenario();
     let result = await callTool("get_file_info", { path: scenario.virtualPath });
     assert.equal(result.isError, true);
