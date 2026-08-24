@@ -135,9 +135,15 @@ Run the deployment bundle validation without publishing a Worker:
 npm.cmd run deploy -- --dry-run
 ```
 
+Run the dependency vulnerability gate at the same severity used by CI:
+
+```powershell
+npm.cmd audit --audit-level=low
+```
+
 When intentionally changing package metadata or dependencies, use npm to update `package-lock.json`, review the lockfile diff, and repeat a clean `npm.cmd ci`. Do not edit generated lockfile entries by hand.
 
-GitHub Actions runs the same credential-free checks on pushes and pull requests. CI must remain fully mocked and must not receive pCloud, Cloudflare, or deployment credentials.
+GitHub Actions runs the same credential-free checks, including the low-severity dependency audit, on pushes and pull requests. CI must remain fully mocked and must not receive pCloud, Cloudflare, or deployment credentials.
 
 The PowerShell `.cmd` form is shown because some Windows environments block the `npm.ps1`/`npx.ps1` shims through execution policy.
 

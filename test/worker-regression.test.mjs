@@ -15,7 +15,9 @@ const CONTENT_HOST = "content.pcloud.com";
 const CONTENT_PATH = "/temporary/mock-content";
 const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
+const SEARCH_PCLOUD_JSON_MAX_BYTES = 16 * 1024 * 1024;
 const SEARCH_DEFAULT_MAX_FOLDER_API_CALLS = 45;
+const TOOL_INVOCATION_TIMEOUT_MS = 45_000;
 const PCLOUD_PATH_MAX_BYTES = 16 * 1024;
 const OUTBOUND_URL_MAX_BYTES = 16 * 1024;
 const PCLOUD_FORM_BODY_MAX_BYTES = 64 * 1024;
@@ -408,6 +410,7 @@ async function sendMcpRequest(body, {
   token = accessJwt,
   overrides = {},
   headers = {},
+  signal,
 } = {}) {
   const requestInit = {
     method: "POST",
@@ -419,6 +422,7 @@ async function sendMcpRequest(body, {
       ...headers,
     },
     body,
+    signal,
   };
   if (body instanceof ReadableStream) {
     requestInit.duplex = "half";
@@ -437,6 +441,10 @@ async function rpc(method, params, overrides = {}, token = accessJwt) {
     JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
     { overrides, token },
   );
+  return parseRpcHttpResponse(response);
+}
+
+async function parseRpcHttpResponse(response) {
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
   if (response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -1510,6 +1518,7 @@ test("search uses non-recursive folder listings and completes traversal after ma
     maxScannedEntries: 10_000,
     maxDepth: 64,
     maxFolderApiCalls: SEARCH_DEFAULT_MAX_FOLDER_API_CALLS,
+    maxPCloudJsonBytes: SEARCH_PCLOUD_JSON_MAX_BYTES,
     maxPathBytes: PCLOUD_PATH_MAX_BYTES,
     maxPendingFolders: SEARCH_MAX_PENDING_FOLDERS,
     maxPendingPathBytes: SEARCH_MAX_PENDING_PATH_BYTES,
@@ -1642,6 +1651,119 @@ test("pCloud metadata, getfilelink, and content requests have application timeou
   } finally {
     AbortSignal.timeout = originalTimeout;
   }
+});
+
+test("search uses the shorter remaining overall deadline for each folder fetch", async () => {
+  const originalNow = Date.now;
+  const originalTimeout = AbortSignal.timeout;
+  const timeoutDurations = [];
+  let now = originalNow();
+  try {
+    Date.now = () => now;
+    AbortSignal.timeout = (milliseconds) => {
+      timeoutDurations.push(milliseconds);
+      return new AbortController().signal;
+    };
+    let listCall = 0;
+    setScenario({
+      listResponseFactory: ({ requestedPath }) => {
+        listCall += 1;
+        if (listCall === 1) {
+          now += TOOL_INVOCATION_TIMEOUT_MS - 5_000;
+          return jsonResponse({
+            result: 0,
+            metadata: {
+              path: requestedPath,
+              isfolder: true,
+              contents: [{ isfolder: true, name: "Folder" }],
+            },
+          });
+        }
+        return jsonResponse({
+          result: 0,
+          metadata: {
+            path: requestedPath,
+            isfolder: true,
+            contents: [],
+          },
+        });
+      },
+    });
+
+    const result = parseToolText(
+      await callTool("search_files", { query: "absent", path: "/" }),
+    );
+    assert.equal(result.folderApiCalls, 2);
+    assert.deepEqual(timeoutDurations.slice(-2), [10_000, 5_000]);
+  } finally {
+    Date.now = originalNow;
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test("search stops before another pCloud call after its overall deadline", async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  try {
+    Date.now = () => now;
+    setScenario({
+      listResponseFactory: ({ requestedPath }) => {
+        now += TOOL_INVOCATION_TIMEOUT_MS;
+        return jsonResponse({
+          result: 0,
+          metadata: {
+            path: requestedPath,
+            isfolder: true,
+            contents: [{ isfolder: true, name: "Folder" }],
+          },
+        });
+      },
+    });
+
+    const result = await callTool("search_files", {
+      query: "folder",
+      path: "/",
+    });
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud operation was canceled or exceeded its deadline.",
+    );
+    assert.equal(pCloudCallCount("/listfolder"), 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("search propagates client abort without exposing its reason or starting another call", async () => {
+  const controller = new AbortController();
+  const privateAbortReason =
+    "private abort reason with https://temporary.example/physical/path";
+  setScenario({
+    listResponseFactory: ({ requestedPath }) => {
+      controller.abort(new Error(privateAbortReason));
+      return jsonResponse({
+        result: 0,
+        metadata: {
+          path: requestedPath,
+          isfolder: true,
+          contents: [{ isfolder: true, name: "Folder" }],
+        },
+      });
+    },
+  });
+
+  const response = await sendMcpRequest(
+    createRpcBody("tools/call", {
+      name: "search_files",
+      arguments: { query: "folder", path: "/" },
+    }),
+    { signal: controller.signal },
+  );
+  const responseText = await response.text();
+  assert.ok(!responseText.includes(privateAbortReason));
+  assert.ok(!responseText.includes("temporary.example"));
+  assert.equal(pCloudCallCount("/listfolder"), 1);
 });
 
 test("outbound pCloud requests bound encoded forms, IDs, and content URLs", async () => {
@@ -1900,6 +2022,12 @@ test("search honors configured folder-call limits and succeeds exactly at the li
   assert.equal(result.scannedEntries, 2);
   assert.equal(result.totalMatches, 1);
   assert.equal(result.safetyLimits.maxFolderApiCalls, 2);
+  assert.equal(
+    result.safetyLimits.maxPCloudJsonBytes,
+    SEARCH_PCLOUD_JSON_MAX_BYTES,
+  );
+  assert.ok(result.pCloudJsonBytes > 0);
+  assert.ok(result.pCloudJsonBytes <= SEARCH_PCLOUD_JSON_MAX_BYTES);
   assert.equal(pCloudCallCount("/listfolder"), 2);
 
   setScenario({
@@ -1981,6 +2109,94 @@ test("search distinguishes a folder JSON overflow and propagates traversal API e
     "pCloud API request failed with result code 2000.",
   );
   assert.equal(pCloudCallCount("/listfolder"), 2);
+});
+
+test("search enforces its aggregate pCloud JSON budget across large responses", async () => {
+  const padding = "x".repeat(3 * 1024 * 1024);
+  let responseIndex = 0;
+  setScenario({
+    listResponseFactory: ({ requestedPath }) => {
+      responseIndex += 1;
+      if (responseIndex === 6) {
+        return streamingResponse([], {
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(2 * 1024 * 1024),
+          },
+          onCancel() {
+            pCloudApiCancelCount += 1;
+          },
+          keepOpenOnExhaustion: true,
+        });
+      }
+      return jsonResponse({
+        result: 0,
+        metadata: {
+          path: requestedPath,
+          isfolder: true,
+          padding,
+          contents: [{ isfolder: true, name: `folder-${responseIndex}` }],
+        },
+      });
+    },
+  });
+
+  let result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1024" },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    `Search exceeded the ${SEARCH_PCLOUD_JSON_MAX_BYTES}-byte aggregate pCloud JSON response safety limit; no complete search result was returned. Retry with a narrower path.`,
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 6);
+  assert.equal(pCloudApiCancelCount, 1);
+
+  responseIndex = 0;
+  setScenario({
+    listResponseFactory: ({ requestedPath }) => {
+      responseIndex += 1;
+      if (responseIndex === 6) {
+        return streamingResponse(
+          [
+            new Uint8Array(700 * 1024),
+            new Uint8Array(700 * 1024),
+          ],
+          {
+            headers: { "content-type": "application/json" },
+            onCancel() {
+              pCloudApiCancelCount += 1;
+            },
+            keepOpenOnExhaustion: true,
+          },
+        );
+      }
+      return jsonResponse({
+        result: 0,
+        metadata: {
+          path: requestedPath,
+          isfolder: true,
+          padding,
+          contents: [{ isfolder: true, name: `folder-${responseIndex}` }],
+        },
+      });
+    },
+  });
+
+  result = await callTool(
+    "search_files",
+    { query: "absent", path: "/" },
+    { PCLOUD_SEARCH_MAX_FOLDER_CALLS: "1024" },
+  );
+  assert.equal(result.isError, true);
+  assert.equal(
+    result.content[0].text,
+    `Search exceeded the ${SEARCH_PCLOUD_JSON_MAX_BYTES}-byte aggregate pCloud JSON response safety limit; no complete search result was returned. Retry with a narrower path.`,
+  );
+  assert.equal(pCloudCallCount("/listfolder"), 6);
+  assert.equal(pCloudApiCancelCount, 1);
 });
 
 test("search refuses response-derived paths that could escape the virtual root", async () => {
