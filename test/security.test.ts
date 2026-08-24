@@ -248,41 +248,48 @@ test("MCP ingress counts a lengthless stream and cancels on actual overflow", as
 });
 
 test("MCP ingress applies one absolute deadline to incomplete body streams", async () => {
-  for (const contentLength of [undefined, "16"]) {
-    let cancelCount = 0;
-    let dispatchCount = 0;
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new Uint8Array([0x7b]));
-      },
-      cancel() {
-        cancelCount += 1;
-      },
-    });
-    const headers =
-      contentLength === undefined ? undefined : { "content-length": contentLength };
-    const request = new Request("https://worker.example/mcp", {
-      method: "POST",
-      headers,
-      body,
-      duplex: "half",
-    } as RequestInit & { duplex: "half" });
-
-    await assert.rejects(
-      dispatchBoundedMcpRequest(
-        request,
-        () => {
-          dispatchCount += 1;
+  const keepEventLoopActive = setTimeout(() => {}, 500);
+  try {
+    for (const contentLength of [undefined, "16"]) {
+      let cancelCount = 0;
+      let dispatchCount = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0x7b]));
         },
-        { deadlineAt: Date.now() + 25 },
-      ),
-      (error: unknown) =>
-        error instanceof McpRequestBodyError &&
-        error.status === 408 &&
-        error.message === "MCP request was canceled or exceeded its deadline.",
-    );
-    assert.equal(cancelCount, 1);
-    assert.equal(dispatchCount, 0);
+        cancel() {
+          cancelCount += 1;
+        },
+      });
+      const headers =
+        contentLength === undefined
+          ? undefined
+          : { "content-length": contentLength };
+      const request = new Request("https://worker.example/mcp", {
+        method: "POST",
+        headers,
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+
+      await assert.rejects(
+        dispatchBoundedMcpRequest(
+          request,
+          () => {
+            dispatchCount += 1;
+          },
+          { deadlineAt: Date.now() + 25 },
+        ),
+        (error: unknown) =>
+          error instanceof McpRequestBodyError &&
+          error.status === 408 &&
+          error.message === "MCP request was canceled or exceeded its deadline.",
+      );
+      assert.equal(cancelCount, 1);
+      assert.equal(dispatchCount, 0);
+    }
+  } finally {
+    clearTimeout(keepEventLoopActive);
   }
 });
 
