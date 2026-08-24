@@ -7,14 +7,29 @@ export type RateLimitBinding = {
 export type McpRateLimitDecision = "allowed" | "limited" | "unavailable";
 
 export class McpRequestBodyError extends Error {
-  readonly status: 400 | 413;
+  readonly status: 400 | 408 | 413;
 
-  constructor(status: 400 | 413, message: string) {
+  constructor(status: 400 | 408 | 413, message: string) {
     super(message);
     this.name = "McpRequestBodyError";
     this.status = status;
   }
 }
+
+export type McpRequestGuardOptions = {
+  maxBytes?: number;
+  deadlineAt?: number;
+};
+
+class McpRequestReadCanceledError extends Error {
+  constructor() {
+    super("MCP request body read was canceled.");
+    this.name = "McpRequestReadCanceledError";
+  }
+}
+
+const MCP_REQUEST_CANCELED_MESSAGE =
+  "MCP request was canceled or exceeded its deadline.";
 
 function isJsonWhitespace(byte: number): boolean {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
@@ -54,28 +69,74 @@ function parseContentLength(value: string): number {
   return parsed;
 }
 
-async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+async function cancelBody(
+  body: ReadableStream<Uint8Array> | null,
+  reason: string,
+): Promise<void> {
   try {
-    await body?.cancel("MCP request body exceeded the byte limit.");
+    await body?.cancel(reason);
   } catch {
     // The bounded-ingress response remains the relevant failure.
   }
 }
 
+async function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  reason: string,
+): Promise<void> {
+  try {
+    await reader.cancel(reason);
+  } catch {
+    // The bounded-ingress response remains the relevant failure.
+  }
+}
+
+function createBodyReadSignal(
+  requestSignal: AbortSignal,
+  deadlineAt: number | undefined,
+): AbortSignal {
+  if (deadlineAt === undefined) {
+    return requestSignal;
+  }
+
+  const remainingMs = deadlineAt - Date.now();
+  if (requestSignal.aborted || remainingMs <= 0) {
+    return AbortSignal.abort();
+  }
+
+  return AbortSignal.any([
+    requestSignal,
+    AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs))),
+  ]);
+}
+
 export async function createBoundedMcpRequest(
   request: Request,
-  maxBytes = MCP_REQUEST_MAX_BYTES,
+  options: McpRequestGuardOptions = {},
 ): Promise<Request> {
+  const maxBytes = options.maxBytes ?? MCP_REQUEST_MAX_BYTES;
   const contentLengthHeader = request.headers.get("content-length");
   if (contentLengthHeader !== null) {
     const contentLength = parseContentLength(contentLengthHeader);
     if (contentLength > maxBytes) {
-      await cancelBody(request.body);
+      await cancelBody(
+        request.body,
+        "MCP request body exceeded the byte limit.",
+      );
       throw new McpRequestBodyError(
         413,
         `MCP request body exceeds the ${maxBytes}-byte limit.`,
       );
     }
+  }
+
+  const readSignal = createBodyReadSignal(
+    request.signal,
+    options.deadlineAt,
+  );
+  if (readSignal.aborted) {
+    await cancelBody(request.body, MCP_REQUEST_CANCELED_MESSAGE);
+    throw new McpRequestBodyError(408, MCP_REQUEST_CANCELED_MESSAGE);
   }
 
   if (!request.body) {
@@ -85,21 +146,32 @@ export async function createBoundedMcpRequest(
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
+  let abortListener: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    abortListener = () => reject(new McpRequestReadCanceledError());
+    if (readSignal.aborted) {
+      abortListener();
+    } else {
+      readSignal.addEventListener("abort", abortListener, { once: true });
+    }
+  });
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([
+        reader.read(),
+        abortPromise,
+      ]);
       if (done) {
         break;
       }
 
       totalBytes += value.byteLength;
       if (totalBytes > maxBytes) {
-        try {
-          await reader.cancel("MCP request body exceeded the byte limit.");
-        } catch {
-          // The bounded-ingress response remains the relevant failure.
-        }
+        await cancelReader(
+          reader,
+          "MCP request body exceeded the byte limit.",
+        );
         throw new McpRequestBodyError(
           413,
           `MCP request body exceeds the ${maxBytes}-byte limit.`,
@@ -112,8 +184,15 @@ export async function createBoundedMcpRequest(
     if (error instanceof McpRequestBodyError) {
       throw error;
     }
+    if (error instanceof McpRequestReadCanceledError || readSignal.aborted) {
+      await cancelReader(reader, MCP_REQUEST_CANCELED_MESSAGE);
+      throw new McpRequestBodyError(408, MCP_REQUEST_CANCELED_MESSAGE);
+    }
     throw new McpRequestBodyError(400, "Unable to read the MCP request body.");
   } finally {
+    if (abortListener) {
+      readSignal.removeEventListener("abort", abortListener);
+    }
     reader.releaseLock();
   }
 
@@ -143,9 +222,9 @@ export async function createBoundedMcpRequest(
 export async function dispatchBoundedMcpRequest<T>(
   request: Request,
   dispatch: (boundedRequest: Request) => T | Promise<T>,
-  maxBytes = MCP_REQUEST_MAX_BYTES,
+  options: McpRequestGuardOptions = {},
 ): Promise<T> {
-  const boundedRequest = await createBoundedMcpRequest(request, maxBytes);
+  const boundedRequest = await createBoundedMcpRequest(request, options);
   return dispatch(boundedRequest);
 }
 

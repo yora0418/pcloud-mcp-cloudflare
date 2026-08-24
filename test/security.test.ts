@@ -247,6 +247,97 @@ test("MCP ingress counts a lengthless stream and cancels on actual overflow", as
   assert.equal(dispatchCount, 0);
 });
 
+test("MCP ingress applies one absolute deadline to incomplete body streams", async () => {
+  const keepEventLoopActive = setTimeout(() => {}, 500);
+  try {
+    for (const contentLength of [undefined, "16"]) {
+      let cancelCount = 0;
+      let dispatchCount = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0x7b]));
+        },
+        cancel() {
+          cancelCount += 1;
+        },
+      });
+      const headers =
+        contentLength === undefined
+          ? undefined
+          : { "content-length": contentLength };
+      const request = new Request("https://worker.example/mcp", {
+        method: "POST",
+        headers,
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+
+      await assert.rejects(
+        dispatchBoundedMcpRequest(
+          request,
+          () => {
+            dispatchCount += 1;
+          },
+          { deadlineAt: Date.now() + 25 },
+        ),
+        (error: unknown) =>
+          error instanceof McpRequestBodyError &&
+          error.status === 408 &&
+          error.message === "MCP request was canceled or exceeded its deadline.",
+      );
+      assert.equal(cancelCount, 1);
+      assert.equal(dispatchCount, 0);
+    }
+  } finally {
+    clearTimeout(keepEventLoopActive);
+  }
+});
+
+test("MCP ingress cancels body reading on client abort without exposing its reason", async () => {
+  const controller = new AbortController();
+  const privateAbortReason =
+    "private abort reason with https://temporary.example/physical/path";
+  let cancelCount = 0;
+  let dispatchCount = 0;
+  const body = new ReadableStream<Uint8Array>({
+    start(streamController) {
+      streamController.enqueue(new Uint8Array([0x7b]));
+    },
+    cancel() {
+      cancelCount += 1;
+    },
+  });
+  const request = new Request("https://worker.example/mcp", {
+    method: "POST",
+    body,
+    duplex: "half",
+    signal: controller.signal,
+  } as RequestInit & { duplex: "half" });
+
+  const outcome = dispatchBoundedMcpRequest(
+    request,
+    () => {
+      dispatchCount += 1;
+    },
+    { deadlineAt: Date.now() + 1_000 },
+  );
+  setTimeout(() => controller.abort(new Error(privateAbortReason)), 5);
+
+  await assert.rejects(outcome, (error: unknown) => {
+    assert.ok(error instanceof McpRequestBodyError);
+    assert.equal(error.status, 408);
+    assert.equal(
+      error.message,
+      "MCP request was canceled or exceeded its deadline.",
+    );
+    assert.ok(!error.message.includes(privateAbortReason));
+    assert.ok(!error.message.includes("temporary.example"));
+    return true;
+  });
+  assert.equal(cancelCount, 1);
+  assert.equal(dispatchCount, 0);
+});
+
 test("rate limiting isolates principal keys and fails closed when unavailable", async () => {
   const counts = new Map<string, number>();
   const binding = {
