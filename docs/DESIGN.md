@@ -273,7 +273,7 @@ YoraLAB provides the software; YoraLAB does not host users' personal pCloud acce
 
 ## Repository visibility
 
-The repository remains private and publication is on hold. Production regression and the focused independent re-audit of the current remediation passed with no P0, P1, or P2 findings and no code or security release blocker. The two remaining P3 follow-ups are non-blocking. Publication remains pending post-merge `main` verification, the final pre-publication gate, and explicit release approval. Publication, tagging, and the first GitHub Release remain separate release steps.
+The repository remains private and publication is on hold. Production regression and the focused independent review of the exact-search and request-deadline remediation passed with no P0, P1, P2, or P3 findings and no code or security release blocker. Publication remains pending post-merge `main` verification, the final pre-publication gate, and explicit release approval. Publication, tagging, and the first GitHub Release remain separate release steps.
 
 ## License
 
@@ -383,12 +383,12 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - complete production integration validation for the latest remediation, including authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
 - explicitly disable unused MCP subscriptions; bind successful metadata responses to their requested target; bound aggregate paths, pending search work, and serialized metadata results; sanitize content-stream failures; and align observability and supported Node.js lines
 - reject legacy JSON-RPC batches before SDK dispatch; bound encoded outbound parameters and final URLs; validate search entries incrementally; apply a metadata result budget to `get_file_info`; and add explicit upstream request timeouts
-- cap cumulative pCloud folder-listing JSON at 16 MiB per search, apply a 45-second tool deadline with client-abort propagation, and enforce the low-severity dependency audit in CI
-- complete production regression and a focused independent re-audit with no P0, P1, or P2 findings; retain two non-blocking P3 follow-ups without treating them as v0.1 release blockers
+- cap cumulative pCloud folder-listing JSON at 16 MiB per search, apply a 45-second request deadline covering bounded body reading and tool execution with client-abort propagation, and enforce the low-severity dependency audit in CI
+- preserve exact search-query identity, match names and relative paths separately without synthetic-boundary matches, and reject unsupported query controls before traversal
+- complete production regression and a focused independent review with no P0, P1, P2, or P3 findings and no code or security release blocker
 - require post-merge `main` verification, the final pre-publication gate, and explicit release approval before publication
 
 ### Later
 
 - indexing/caching only if real usage shows it is needed
 - investigate shared OAuth only if onboarding friction becomes worth solving
-- strengthen client-abort regression coverage against a more production-like Workers runtime after v0.1
