@@ -1,8 +1,24 @@
 # Self-hosting setup
 
-This guide deploys the Worker into your own Cloudflare account and connects it to your own pCloud account. You are responsible for the Cloudflare Access policy and the pCloud subtree exposed to MCP clients.
+This is the manual technical setup path for deploying the Worker into your own Cloudflare account and connecting it to your own pCloud account. You are responsible for the Cloudflare Access policy and the pCloud subtree exposed to MCP clients.
 
-External dashboards and client capabilities change over time. Use the linked vendor documentation for current UI details; this guide documents the configuration expected by this repository.
+If you prefer AI-assisted setup, return to the [README](../README.md) and use the AI-assisted setup path.
+
+External dashboards and client capabilities change over time. Use the linked vendor documentation for current UI details; this guide documents the configuration expected by this repository rather than attempting to mirror every dashboard screen.
+
+## Command notation
+
+Command examples use the cross-platform `npm`, `npx`, and `cd` forms. They are intended for macOS, Linux, WSL, and normal Windows PowerShell environments.
+
+Some Windows PowerShell configurations block the `npm.ps1` or `npx.ps1` shim through execution policy. If that happens, use the `.cmd` form instead:
+
+| Command shown in this guide | Windows PowerShell fallback |
+| --- | --- |
+| `npm` | `npm.cmd` |
+| `npx` | `npx.cmd` |
+| `cd` | `cd` or `Set-Location` |
+
+The project is not Windows-only.
 
 ## Prerequisites
 
@@ -15,28 +31,26 @@ Cloudflare documents the currently supported Node.js releases for Wrangler in it
 
 ## 1. Prepare the repository
 
-```powershell
+```shell
 git clone https://github.com/yora0418/pcloud-mcp-cloudflare.git
-Set-Location pcloud-mcp-cloudflare
-npm.cmd ci
-npm.cmd test
-npm.cmd run typecheck
-npm.cmd run deploy -- --dry-run
+cd pcloud-mcp-cloudflare
+npm ci
+npm test
+npm run typecheck
+npm run deploy -- --dry-run
 ```
-
-On shells that do not require the Windows `.cmd` shim, use `npm` in place of `npm.cmd`.
 
 Authenticate Wrangler without placing Cloudflare credentials in the repository:
 
-```powershell
-npx.cmd wrangler login
+```shell
+npx wrangler login
 ```
 
 ## 2. Obtain a pCloud OAuth access token
 
 1. Register an application in [pCloud My Apps](https://docs.pcloud.com/my_apps/) and keep its client ID and client secret private.
 2. Follow pCloud's [OAuth authorization documentation](https://docs.pcloud.com/methods/oauth_2.0/authorize.html). For a server deployment, pCloud recommends the authorization-code flow (`response_type=code`). Use an exact registered redirect URI and a random `state` value. If no redirect URI is supplied for the code flow, pCloud may display the authorization code instead.
-3. Exchange the short-lived code using pCloud's [`oauth2_token` method](https://docs.pcloud.com/methods/oauth_2.0/oauth2_token.html) from a trusted local environment. Send the client ID, client secret, and code in the request body rather than publishing them in a URL, script, shell history, or issue.
+3. Exchange the short-lived code using pCloud's [`oauth2_token` method](https://docs.pcloud.com/methods/oauth_2.0/oauth2_token.html) from a trusted local environment. Send the client ID, client secret, and code in the request body rather than publishing them in a URL, script, shell history, issue, or AI prompt.
 4. Record the API `hostname` associated with the authorized account. pCloud uses `api.pcloud.com` for US accounts and `eapi.pcloud.com` for EU accounts; the authorization response identifies the correct host for subsequent calls.
 5. Retain only the resulting access token for Worker configuration. This Worker does not need the pCloud client secret at runtime.
 
@@ -44,11 +58,15 @@ Never commit an authorization code, client secret, or access token. A pCloud acc
 
 ## 3. Create the Worker endpoint
 
+The tracked `wrangler.jsonc` defines an `MCP_RATE_LIMITER` binding with the default `namespace_id` value `1001`. Cloudflare requires this to be a positive-integer string. If the same Cloudflare account already uses namespace `1001` for another rate-limit binding, change this value in your local `wrangler.jsonc` to another unused positive integer before the first deployment. If Wrangler reports a rate-limit binding or namespace conflict during deployment, this is the first setting to check.
+
 Deploy once to create the Worker and obtain its HTTPS hostname:
 
-```powershell
-npm.cmd run deploy
+```shell
+npm run deploy
 ```
+
+After a successful deployment, Wrangler prints the deployed Worker URL in the terminal output. The Worker hostname is also available from the Worker's overview in the Cloudflare dashboard. Dashboard labels can change, so use Cloudflare's current Workers documentation if the location is not obvious.
 
 Until valid Cloudflare Access configuration is present, the Worker fails closed with a forbidden response. Do not connect an MCP client until the following Access and runtime configuration steps are complete.
 
@@ -83,28 +101,28 @@ The default search limit leaves headroom below the Workers Free external-subrequ
 
 The Worker sends bounded pCloud JSON parameters in POST form bodies, rejects final outbound URLs over 16 KiB, and applies explicit timeouts to Access JWKS, pCloud metadata/link, and content requests. Authenticated MCP requests have a fixed 45-second absolute deadline covering bounded body reading and tool execution; client disconnects cancel body reading and pCloud work. `search_files` also has a fixed 16 MiB aggregate folder-listing JSON budget that does not grow with `PCLOUD_SEARCH_MAX_FOLDER_CALLS`. Unscoped `list_folder` accepts only canonical decimal folder IDs of at most 128 digits. These are application safety bounds; no additional deployment variable is required.
 
-You can enter the pCloud token interactively without placing it on a command line:
+Enter the pCloud token interactively without placing it on a command line:
 
-```powershell
-npx.cmd wrangler secret put PCLOUD_ACCESS_TOKEN
+```shell
+npx wrangler secret put PCLOUD_ACCESS_TOKEN
 ```
 
 The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables and secrets.
 
 It also enables invocation logs at full sampling and explicitly disables Workers Traces. Keep application logs generic and never log credentials, physical pCloud paths, temporary content URLs, filenames, or file content. Before enabling traces or additional telemetry, review whether automatically captured outbound-request metadata and the selected retention/access policy are appropriate for the exposed pCloud subtree.
 
-It also defines the non-secret `MCP_RATE_LIMITER` binding with a default of 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Its `namespace_id` is a positive-integer string required by Cloudflare. If namespace `1001` is already used by another rate-limit binding in the same Cloudflare account, select a different unused positive integer before the first deployment; bindings sharing a namespace also share counters for matching keys. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
+The `MCP_RATE_LIMITER` binding defaults to 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Bindings sharing a `namespace_id` also share counters for matching keys, which is why a deployment-specific namespace collision should be resolved before use. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
 
 ## 6. Deploy and verify
 
 After Access, variables, and the secret are configured, validate and deploy:
 
-```powershell
-npm.cmd ci
-npm.cmd test
-npm.cmd run typecheck
-npm.cmd run deploy -- --dry-run
-npm.cmd run deploy
+```shell
+npm ci
+npm test
+npm run typecheck
+npm run deploy -- --dry-run
+npm run deploy
 ```
 
 The remote MCP endpoint is:
@@ -130,18 +148,52 @@ Client-side model behavior and support for image or embedded Office content are 
 
 `get_office_content` returns its binary resource inside a tool result. It does not register standalone `resources/list` or `resources/read` APIs, so a general MCP client must support embedded resource content in tool results to consume Office bytes.
 
+## Troubleshooting
+
+### `npm` or `npx` is blocked in Windows PowerShell
+
+If PowerShell reports an execution-policy error involving `npm.ps1` or `npx.ps1`, use `npm.cmd` or `npx.cmd` as described in [Command notation](#command-notation). This does not indicate that the project itself is Windows-specific.
+
+### The first deployment does not show an obvious Worker hostname
+
+A successful `npm run deploy` normally prints the deployed URL in Wrangler's terminal output. You can also open the Worker in the Cloudflare dashboard and inspect its overview/routing information. If deployment itself failed, resolve that failure before looking for a hostname.
+
+### Deployment fails around the rate-limit binding
+
+Check the `MCP_RATE_LIMITER` entry in `wrangler.jsonc`. If its `namespace_id` is already used by another rate-limit binding in the same Cloudflare account, select another unused positive integer and deploy again. Do not remove the binding to make deployment succeed; the application intentionally fails closed when rate limiting is unavailable.
+
+### The Worker returns Forbidden
+
+Before Step 4 is complete, a forbidden response is expected. After configuration, verify that Cloudflare Access protects the exact hostname you are using, that your identity matches an Allow policy, and that `TEAM_DOMAIN` and `POLICY_AUD` correspond to that Access application. Do not solve an authentication problem by exposing an unprotected alternate Worker route.
+
+### OAuth completes but the MCP client cannot discover or use tools
+
+Confirm that the client is configured with the exact `/mcp` endpoint, Cloudflare Managed OAuth is enabled for the protected application, and any redirect-client restrictions allow the MCP client you are using. If the server was updated, refresh or recreate the client registration so stale tool metadata is not reused.
+
+### `hello` works but pCloud-backed tools fail
+
+Check that `PCLOUD_ACCESS_TOKEN` is configured as a Worker secret, `PCLOUD_API_HOST` matches the US/EU hostname returned by pCloud OAuth, and `PCLOUD_ROOT_PATH` refers to a real folder if it is set. Do not paste the token into an Issue, log, screenshot, or AI prompt while troubleshooting.
+
+### `list_folder` at `/` exposes more content than intended
+
+Stop before reading additional files. Set `PCLOUD_ROOT_PATH` to the smallest pCloud subtree that the connected client should be able to receive, then call `list_folder` on `/` again and verify the scope before continuing.
+
+### Search fails on a large folder tree
+
+Use a narrower `path` for `search_files`. Do not assume a bounded search returns partial results. Increase `PCLOUD_SEARCH_MAX_FOLDER_CALLS` only when the selected Workers plan has enough external-subrequest allowance; the separate aggregate response and traversal limits still apply.
+
 ## Updating
 
 Review upstream changes, then update from a clean checkout:
 
-```powershell
+```shell
 git switch main
 git pull --ff-only
-npm.cmd ci
-npm.cmd test
-npm.cmd run typecheck
-npm.cmd run deploy -- --dry-run
-npm.cmd run deploy
+npm ci
+npm test
+npm run typecheck
+npm run deploy -- --dry-run
+npm run deploy
 ```
 
 Recheck the scoped root and one harmless tool call after deployment. Normal deployment does not require re-entering dashboard variables because `keep_vars` is enabled.
@@ -150,10 +202,10 @@ Recheck the scoped root and one harmless tool call after deployment. Normal depl
 
 Cloudflare Workers retains versions and deployments. Inspect the current deployment and recent versions before selecting a known-good version:
 
-```powershell
-npx.cmd wrangler deployments status
-npx.cmd wrangler versions list
-npx.cmd wrangler rollback VERSION_ID
+```shell
+npx wrangler deployments status
+npx wrangler versions list
+npx wrangler rollback VERSION_ID
 ```
 
 Replace `VERSION_ID` with the selected known-good version. Follow Cloudflare's [rollback documentation](https://developers.cloudflare.com/workers/versions-and-deployments/rollbacks/) for current behavior and limitations. After rollback, verify Access authentication, runtime configuration, and the virtual-root scope.
