@@ -11,8 +11,10 @@ const TEAM_DOMAIN = "https://phase81-test.cloudflareaccess.com";
 const POLICY_AUD = "mock-policy-audience";
 const ACCESS_TOKEN = "mock-pcloud-access-token";
 const ROOT_PATH = "/Scoped";
+const PCLOUD_API_HOST = "api.pcloud.com";
 const CONTENT_HOST = "content.pcloud.com";
 const CONTENT_PATH = "/temporary/mock-content";
+const EXPECTED_PCLOUD_HOSTS = new Set([PCLOUD_API_HOST, CONTENT_HOST]);
 const MCP_REQUEST_MAX_BYTES = 256 * 1024;
 const PCLOUD_JSON_MAX_BYTES = 4 * 1024 * 1024;
 const SEARCH_PCLOUD_JSON_MAX_BYTES = 16 * 1024 * 1024;
@@ -172,9 +174,30 @@ async function makeAccessJwt(options = {}) {
   return jwt.sign(accessPrivateKey);
 }
 
+function isExpectedPCloudUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+
+  return (
+    url.protocol === "https:" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.port === "" &&
+    url.search === "" &&
+    url.hash === "" &&
+    EXPECTED_PCLOUD_HOSTS.has(url.hostname)
+  );
+}
+
 function pCloudCallCount(pathname) {
   return fetchCalls.filter(
-    ({ url }) => url.hostname.endsWith("pcloud.com") && url.pathname === pathname,
+    ({ url }) =>
+      isExpectedPCloudUrl(url) &&
+      (pathname === undefined || url.pathname === pathname),
   ).length;
 }
 
@@ -246,7 +269,7 @@ before(async () => {
       return jsonResponse({ keys: [publicJwk] });
     }
 
-    if (url.hostname === "api.pcloud.com" && url.pathname === "/stat") {
+    if (url.hostname === PCLOUD_API_HOST && url.pathname === "/stat") {
       assert.equal(request.method, "POST");
       assert.equal(url.search, "");
       assert.equal(request.redirect, "manual");
@@ -268,7 +291,7 @@ before(async () => {
     }
 
     if (
-      url.hostname === "api.pcloud.com" &&
+      url.hostname === PCLOUD_API_HOST &&
       url.pathname === "/listfolder"
     ) {
       assert.equal(request.method, "POST");
@@ -327,7 +350,7 @@ before(async () => {
     }
 
     if (
-      url.hostname === "api.pcloud.com" &&
+      url.hostname === PCLOUD_API_HOST &&
       url.pathname === "/getfilelink"
     ) {
       assert.equal(request.method, "POST");
@@ -396,7 +419,7 @@ const env = {
   TEAM_DOMAIN,
   POLICY_AUD,
   PCLOUD_ACCESS_TOKEN: ACCESS_TOKEN,
-  PCLOUD_API_HOST: "api.pcloud.com",
+  PCLOUD_API_HOST,
   PCLOUD_ROOT_PATH: ROOT_PATH,
   MCP_RATE_LIMITER: allowRateLimiter,
 };
@@ -467,6 +490,26 @@ async function callTool(name, args, overrides = {}) {
   assert.equal(response.error, undefined, JSON.stringify(response.error));
   return response.result;
 }
+
+test("pCloud request counting accepts only structurally valid exact mock hosts", () => {
+  for (const value of [
+    `https://${PCLOUD_API_HOST}/stat`,
+    `https://${CONTENT_HOST}${CONTENT_PATH}`,
+  ]) {
+    assert.equal(isExpectedPCloudUrl(value), true);
+  }
+
+  for (const value of [
+    "https://evil-pcloud.com/stat",
+    "https://pcloud.com.evil.example/stat",
+    `https://user@${PCLOUD_API_HOST}/stat`,
+    `https://${PCLOUD_API_HOST}@evil.example/stat`,
+    `http://${PCLOUD_API_HOST}/stat`,
+    `https://${PCLOUD_API_HOST}:8443/stat`,
+  ]) {
+    assert.equal(isExpectedPCloudUrl(value), false);
+  }
+});
 
 test("valid RS256 Access JWT reaches the Worker and tools declare read-only hints", async () => {
   const hello = await callTool("hello", {});
@@ -1341,7 +1384,7 @@ test("unpaired surrogates fail closed across exact pCloud path boundaries", asyn
   );
   assert.equal(pCloudCallCount("/getfilelink"), 1);
   assert.equal(
-    fetchCalls.filter(({ url }) => url.hostname.endsWith("pcloud.com")).length,
+    pCloudCallCount(),
     3,
   );
 
@@ -1358,6 +1401,36 @@ test("unpaired surrogates fail closed across exact pCloud path boundaries", asyn
   );
   assert.equal(pCloudCallCount("/stat"), 1);
   assert.equal(pCloudCallCount("/listfolder"), 1);
+});
+
+test("pCloud content host validation rejects misleading URL authorities", async () => {
+  for (const host of [
+    "evil-pcloud.com",
+    "pcloud.com.evil.example",
+    `user@${CONTENT_HOST}`,
+    `${CONTENT_HOST}@evil.example`,
+  ]) {
+    setScenario({
+      getfilelinkResponseFactory: () =>
+        jsonResponse({ result: 0, hosts: [host], path: CONTENT_PATH }),
+    });
+    const result = await callTool("read_file", {
+      path: scenario.virtualPath,
+      maxBytes: scenario.bytes.byteLength,
+    });
+
+    assert.equal(result.isError, true);
+    assert.equal(
+      result.content[0].text,
+      "pCloud getfilelink returned an invalid response.",
+    );
+    assert.equal(pCloudCallCount("/stat"), 1);
+    assert.equal(pCloudCallCount("/getfilelink"), 1);
+    assert.equal(
+      fetchCalls.filter(({ url }) => url.pathname === CONTENT_PATH).length,
+      0,
+    );
+  }
 });
 
 test("listfolder entry names enforce the 1024-byte UTF-8 boundary", async () => {
