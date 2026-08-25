@@ -80,8 +80,8 @@ For the first release, every user registers their own pCloud application and sto
 
 Goals of this choice:
 
-- no user access tokens are stored by YoraLAB
-- no YoraLAB credential needs to be distributed to self-hosted instances
+- each self-hosted deployment keeps its pCloud access token in its own Cloudflare environment
+- no shared project credential needs to be distributed to self-hosted instances
 - the initial implementation stays simple
 - shared OAuth onboarding work is deferred until there is evidence that users actually need it
 
@@ -95,7 +95,7 @@ Every pCloud JSON API response is read within its method-specific byte limit and
 
 ### Future possibility: shared OAuth application
 
-It may be possible to use a shared YoraLAB pCloud OAuth application so users would not need to register their own pCloud app.
+It may be possible to use a shared project pCloud OAuth application so users would not need to register their own pCloud app.
 
 This has **not** been investigated in enough depth for the initial release. Open questions include:
 
@@ -259,7 +259,7 @@ The tracked observability policy enables invocation logs at full sampling and ex
 ## Deployment / ownership model
 
 ```text
-YoraLAB GitHub repository
+Source repository
         |
         | clone / fork / deploy
         v
@@ -269,11 +269,7 @@ User's Cloudflare account
 User's pCloud account
 ```
 
-YoraLAB provides the software; YoraLAB does not host users' personal pCloud access in the initial model.
-
-## Repository visibility
-
-The repository remains private and publication is on hold. Production regression and the focused independent review of the exact-search and request-deadline remediation passed with no P0, P1, P2, or P3 findings and no code or security release blocker. Publication remains pending post-merge `main` verification, the final pre-publication gate, and explicit release approval. Publication, tagging, and the first GitHub Release remain separate release steps.
+The current model has no shared project service that proxies users' pCloud file access. Each deployment connects its own Cloudflare Worker directly to its configured pCloud account.
 
 ## License
 
@@ -286,9 +282,10 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - npm publication: disabled through `"private": true`
 - reproducibility: npm dependencies are recorded in the tracked `package-lock.json`
 - validation: credential-free GitHub Actions runs the low-severity dependency audit, mocked tests, TypeScript check, and Wrangler deployment dry run
-- publication status: repository visibility, Git tag, and GitHub Release remain pending separate final release steps
 
 ## Development phases
+
+The phase list records implementation history and does not constitute a warranty, certification, or security guarantee.
 
 ### Phase 0 — MCP skeleton — complete
 
@@ -352,24 +349,23 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - validate native Office handling for all three supported formats through a deployed Worker and ChatGPT MCP, including document structure and text, slide text/tables/values/layout, and workbook cells/formulas/results/cross-sheet references/charts
 - treat direct-upload parity as unmeasured rather than claiming equivalence
 
-### Phase 8 — v0.1 public release readiness — in progress
+### Phase 8 — v0.1 hardening and release preparation — complete
 
-#### Phase 8.1 — security hardening — complete
+#### Phase 8.1 — security hardening
 
 - preserve exact pCloud 64-bit metadata without exposing rounded unsafe numeric identifiers or sizes
 - restrict the Cloudflare Access trust anchor to canonical HTTPS team domains and RS256 JWT verification
 - declare read-only MCP tool annotations and add tracked security and regression tests
-- validate the hardened Access authentication and existing pCloud metadata/content paths through a production Worker and ChatGPT MCP
+- validate the hardened Access authentication and existing pCloud metadata/content paths through a deployed Worker and ChatGPT MCP
 
-#### Phase 8.2 — release packaging and documentation — complete
+#### Phase 8.2 — release packaging and documentation
 
 - set the release-candidate identity to version `0.1.0` under `AGPL-3.0-only`
 - track the npm lockfile for reproducible clean installs without publishing an npm package
 - document third-party self-hosting, security reporting, and release boundaries
-- add credential-free CI for tests, type checking, and a Wrangler deployment dry run
-- keep repository publication, tags, and GitHub Releases pending explicit final release approval
+- add credential-free CI for tests, type checking, dependency audit, and a Wrangler deployment dry run
 
-#### Phase 8.4 — external audit remediation — implementation and focused re-audit complete; public release gates pending
+#### Phase 8.4 — audit remediation and boundary hardening
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch
@@ -377,16 +373,13 @@ The project is licensed under `AGPL-3.0-only`. The complete license text is in t
 - validate the default 45-call search bound in production: complete bounded subtrees succeed, while larger trees fail explicitly without partial results before an opaque platform subrequest failure
 - disable Worker Preview URLs explicitly and pin CI actions to immutable release commits
 - retain the existing embedded Office resource transport without adding standalone resource APIs
-- complete the initial external remediation and production integration validation
-- after a subsequent independent audit, fail closed on missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
-- reject unpaired UTF-16 surrogates found by repeat review before any URL or UTF-8 conversion can replace them; the Unicode-focused repeat review found no remaining P0, P1, or P2 findings, and its setup-documentation finding was corrected
-- complete production integration validation for the latest remediation, including authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
+- harden missing or malformed pCloud result codes and malformed folder listings, reconstruct list output paths from trusted virtual parents only, and preserve exact supported path strings without trimming
+- reject unpaired UTF-16 surrogates identified during repeat review before any URL or UTF-8 conversion can replace them
+- validate authenticated connectivity, root listing, bounded subtree search, explicit no-partial-result enforcement at the 45-folder-call search limit, exact metadata and Office retrieval, and preservation of trailing-space path identity
 - explicitly disable unused MCP subscriptions; bind successful metadata responses to their requested target; bound aggregate paths, pending search work, and serialized metadata results; sanitize content-stream failures; and align observability and supported Node.js lines
 - reject legacy JSON-RPC batches before SDK dispatch; bound encoded outbound parameters and final URLs; validate search entries incrementally; apply a metadata result budget to `get_file_info`; and add explicit upstream request timeouts
 - cap cumulative pCloud folder-listing JSON at 16 MiB per search, apply a 45-second request deadline covering bounded body reading and tool execution with client-abort propagation, and enforce the low-severity dependency audit in CI
 - preserve exact search-query identity, match names and relative paths separately without synthetic-boundary matches, and reject unsupported query controls before traversal
-- complete production regression and a focused independent review with no P0, P1, P2, or P3 findings and no code or security release blocker
-- require post-merge `main` verification, the final pre-publication gate, and explicit release approval before publication
 
 ### Later
 
