@@ -1,13 +1,15 @@
 # Security Policy
 
-## Supported versions
+## Security report scope
 
-Security fixes are provided for the current `0.1.x` release line.
+Security reports are accepted for the current `0.1.x` line. Earlier development versions are unsupported.
 
-| Version | Supported |
+| Version | Security reports |
 | --- | --- |
-| `0.1.x` | Yes |
-| Earlier development versions | No |
+| `0.1.x` | In scope |
+| Earlier development versions | Out of scope |
+
+Being in scope for security reports does not create a warranty, support obligation, or guarantee that a fix, response, or release will be provided within any particular time frame. The software remains provided without warranty under the [AGPL-3.0-only license](LICENSE).
 
 ## Reporting a vulnerability
 
