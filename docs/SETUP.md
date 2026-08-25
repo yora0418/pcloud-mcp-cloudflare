@@ -2,7 +2,7 @@
 
 This is the manual technical setup path for deploying the Worker into your own Cloudflare account and connecting it to your own pCloud account. You are responsible for the Cloudflare Access policy and the pCloud subtree exposed to MCP clients.
 
-If you prefer AI-assisted setup, return to the [README](../README.md) and use the AI-assisted setup path.
+If you prefer AI-assisted setup, use the AI-assisted setup path in the [English README](../README.md) or [Japanese README](../README.ja.md).
 
 External dashboards and client capabilities change over time. Use the linked vendor documentation for current UI details; this guide documents the configuration expected by this repository rather than attempting to mirror every dashboard screen.
 
@@ -59,7 +59,7 @@ Never commit an authorization code, client secret, or access token. A pCloud acc
 
 ## 3. Create the Worker endpoint
 
-The tracked `wrangler.jsonc` defines an `MCP_RATE_LIMITER` binding with the default `namespace_id` value `1001`. Cloudflare requires this to be a positive-integer string. If the same Cloudflare account already uses namespace `1001` for another rate-limit binding, change this value in your local `wrangler.jsonc` to another unused positive integer before the first deployment. If Wrangler reports a rate-limit binding or namespace conflict during deployment, this is the first setting to check.
+The tracked `wrangler.jsonc` defines an `MCP_RATE_LIMITER` binding with the default `namespace_id` value `1001`. Cloudflare requires this to be a positive-integer string. Reusing a `namespace_id` is valid; within the same Cloudflare account, rate-limit bindings that use the same `namespace_id` share counters when the key passed to the limiter matches. If unrelated deployments should not share rate-limit state, change the local `wrangler.jsonc` to a different positive integer before deployment.
 
 Deploy once to create the Worker and obtain its HTTPS hostname:
 
@@ -108,11 +108,11 @@ Enter the pCloud token interactively without placing it on a command line:
 npx wrangler secret put PCLOUD_ACCESS_TOKEN
 ```
 
-The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables and secrets.
+The tracked Wrangler configuration has `keep_vars` enabled so normal deployments preserve dashboard-managed variables that are not declared in the tracked configuration. Worker secrets are managed separately by Cloudflare and are not deleted by a normal `wrangler deploy`; secret retention is not a `keep_vars` behavior.
 
 It also enables invocation logs at full sampling and explicitly disables Workers Traces. Keep application logs generic and never log credentials, physical pCloud paths, temporary content URLs, filenames, or file content. Before enabling traces or additional telemetry, review whether automatically captured outbound-request metadata and the selected retention/access policy are appropriate for the exposed pCloud subtree.
 
-The `MCP_RATE_LIMITER` binding defaults to 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Bindings sharing a `namespace_id` also share counters for matching keys, which is why a deployment-specific namespace collision should be resolved before use. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
+The `MCP_RATE_LIMITER` binding defaults to 120 authenticated MCP POST requests per 60 seconds per verified Access principal. Bindings using the same `namespace_id` share counters for matching keys, even across different Workers in the same Cloudflare account. Use a different positive integer when unrelated deployments should not share those counters. Reuse is valid and is not a deployment error by itself. Rate limiting is approximate and local to each Cloudflare location. A missing, invalid, or unavailable binding causes authenticated MCP POST requests to fail closed with HTTP 503.
 
 ## 6. Deploy and verify
 
@@ -161,7 +161,7 @@ A successful `npm run deploy` normally prints the deployed URL in Wrangler's ter
 
 ### Deployment fails around the rate-limit binding
 
-Check the `MCP_RATE_LIMITER` entry in `wrangler.jsonc`. If its `namespace_id` is already used by another rate-limit binding in the same Cloudflare account, select another unused positive integer and deploy again. Do not remove the binding to make deployment succeed; the application intentionally fails closed when rate limiting is unavailable.
+Check the `MCP_RATE_LIMITER` entry in `wrangler.jsonc` against Cloudflare's current Rate Limiting binding requirements, including that `namespace_id` is a positive-integer string. Reusing a `namespace_id` is not itself a namespace conflict or deployment error. If Wrangler reports a deployment failure, follow the specific error it returns. If the concern is unintended counter sharing rather than deployment failure, choose a different positive `namespace_id` for the unrelated binding.
 
 ### The Worker returns Forbidden
 
@@ -197,7 +197,7 @@ npm run deploy -- --dry-run
 npm run deploy
 ```
 
-Recheck the scoped root and one harmless tool call after deployment. Normal deployment does not require re-entering dashboard variables because `keep_vars` is enabled.
+Recheck the scoped root and one harmless tool call after deployment. Normal deployment does not require re-entering dashboard-managed variables because `keep_vars` is enabled. Worker secrets are managed separately and remain configured unless explicitly deleted.
 
 ## Rollback
 

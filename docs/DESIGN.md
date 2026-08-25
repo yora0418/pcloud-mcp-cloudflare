@@ -1,6 +1,6 @@
 # Design Notes
 
-This document records the initial design decisions for `pcloud-mcp-cloudflare`.
+This document records the current architecture, security boundaries, major design decisions, numeric application limits, and implementation history for `pcloud-mcp-cloudflare`.
 
 ## Purpose
 
@@ -24,11 +24,11 @@ Cloudflare Worker
 pCloud
 ```
 
-The source repository is prepared for public distribution. Each user deploys their own Worker instance and supplies their own credentials and Access configuration.
+This repository distributes source for self-hosting. Each operator deploys their own Worker instance and supplies their own credentials and Access configuration. The project does not provide or operate a shared hosted Worker.
 
-## Initial security boundary
+## Security boundary
 
-The initial version is intentionally read-only.
+The project is intentionally read-only.
 
 Allowed capabilities:
 
@@ -39,7 +39,7 @@ Allowed capabilities:
 - retrieve supported image content
 - retrieve supported Office content
 
-Explicitly out of scope for v1:
+Explicitly out of scope for the initial release:
 
 - upload
 - delete
@@ -51,7 +51,7 @@ Explicitly out of scope for v1:
 
 ### MCP endpoint protection
 
-The production Worker is protected by Cloudflare Access before any pCloud data is exposed.
+Each self-hosted production deployment must be protected by Cloudflare Access before any pCloud data is exposed. The project does not provide or operate a shared production Worker.
 
 The Worker also validates the signed JWT supplied by Access in the `Cf-Access-Jwt-Assertion` header. Validation checks:
 
@@ -74,7 +74,7 @@ After successful JWT verification, authenticated `/mcp` POST requests are rate-l
 
 MCP POST bodies pass through an application-level 256 KiB streaming limit before reaching the SDK. Canonical `Content-Length` values above the limit are rejected before buffering, but the Worker always counts streamed bytes and cancels on actual overflow. It reconstructs the Request from only the bounded bytes. A top-level JSON array is rejected before SDK dispatch because v0.1 does not support legacy JSON-RPC batches. GET, HEAD, and other bodyless endpoint behavior remains unchanged.
 
-## Initial pCloud authentication model
+## pCloud authentication model for the initial release
 
 For the first release, every user registers their own pCloud application and stores their own pCloud credentials in their own Cloudflare environment.
 
@@ -155,7 +155,7 @@ The Worker requires a successful `listfolder` response to contain folder metadat
 
 ### `search_files`
 
-Search file/folder metadata under a virtual path. The initial implementation is intentionally metadata-only:
+Search file/folder metadata under a virtual path. The current implementation is intentionally metadata-only:
 
 - case-insensitive substring matching
 - file/folder names
@@ -184,7 +184,7 @@ Return normalized metadata for a specific virtual file path while enforcing the 
 
 ### `read_file`
 
-Retrieve a supported text file by virtual path while applying the same virtual-root boundary. The initial implementation:
+Retrieve a supported text file by virtual path while applying the same virtual-root boundary. The current implementation:
 
 - defaults to a complete-file limit of 256 KiB and allows at most 1 MiB
 - checks pCloud metadata for file type and size before retrieving content
@@ -197,7 +197,7 @@ Retrieve a supported text file by virtual path while applying the same virtual-r
 
 ### `get_image_content`
 
-Retrieve a supported image by exact virtual path and return it directly as MCP ImageContent. The initial implementation:
+Retrieve a supported image by exact virtual path and return it directly as MCP ImageContent. The current implementation:
 
 - supports canonical `image/png` and `image/jpeg` metadata
 - permits `.png`, `.jpg`, and `.jpeg` fallback only when pCloud reports a generic MIME type
@@ -208,7 +208,7 @@ Retrieve a supported image by exact virtual path and return it directly as MCP I
 
 ### `get_office_content`
 
-Retrieve an OOXML Office file by exact virtual path and return its original bytes as an MCP embedded binary resource. The initial implementation:
+Retrieve an OOXML Office file by exact virtual path and return its original bytes as an MCP embedded binary resource. The current implementation:
 
 - supports `.docx`, `.xlsx`, and `.pptx` with their format-specific MIME types
 - accepts the matching canonical MIME type, or a generic/ZIP container MIME when the extension is supported
@@ -243,7 +243,7 @@ The project targets Cloudflare Workers directly rather than requiring a long-run
 Characteristics:
 
 - stateless remote MCP endpoint where practical
-- Cloudflare Access in front of the production Worker
+- Cloudflare Access in front of each self-hosted production deployment
 - Managed OAuth for compatible MCP clients
 - Worker-side Access JWT validation as defense in depth
 - secrets stored using Cloudflare's secret facilities, never committed to Git
@@ -366,6 +366,8 @@ The phase list records implementation history and does not constitute a warranty
 - add credential-free CI for tests, type checking, dependency audit, and a Wrangler deployment dry run
 
 #### Phase 8.4 — audit remediation and boundary hardening
+
+The Phase 8.4 label is retained to match the historical audit-remediation branch and validation records.
 
 - fail closed on pCloud API redirects and bound pCloud JSON responses
 - enforce bounded MCP ingress and per-principal authenticated POST rate limiting before SDK dispatch

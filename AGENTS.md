@@ -4,7 +4,7 @@ These instructions apply to the entire repository.
 
 ## Read first
 
-Before changing code, read `README.md`, `docs/DESIGN.md`, and `docs/DEVELOPMENT.md`.
+Before changing code, read `README.md`, `docs/DESIGN.md`, and `docs/DEVELOPMENT.md`. For deployment, configuration, or security-boundary work, also read `docs/SETUP.md` and `SECURITY.md`. When changing user-facing documentation, review both `README.md` and `README.ja.md`.
 
 ## Project invariants
 
@@ -50,24 +50,28 @@ Do not deploy or change external account configuration unless the user explicitl
 
 ## Validation
 
-For code changes, run at minimum:
+For behavior, configuration, or security-boundary changes, run the relevant tests plus:
 
 ```powershell
 npm.cmd run typecheck
+npm.cmd run deploy -- --dry-run
 ```
 
-If dependencies change, also run `npm.cmd install` before typechecking. Run any additional relevant checks introduced by the change, and do not claim checks that were not run.
+Use `docs/DEVELOPMENT.md` and the current CI workflow to determine the complete validation gate for the change. Do not claim checks that were not run.
+
+For dependency changes, use npm so `package-lock.json` is generated consistently, inspect the package and lockfile diff, validate from a clean `npm.cmd ci`, and then run the relevant validation gate, including the dependency audit when the dependency graph changed. Do not hand-edit generated lockfile entries.
 
 ## Documentation
 
-Update public documentation when behavior, configuration, security boundaries, or architecture changes.
+Update public documentation when behavior, configuration, security boundaries, or architecture changes. Keep the existing documentation responsibilities clear instead of creating a second source of truth:
 
-- `README.md`: English user-facing current behavior
-- `README.ja.md`: Japanese user-facing current behavior; keep behavior, warnings, and setup routing aligned with `README.md`
-- `docs/DESIGN.md`: architecture and security decisions
-- `docs/DEVELOPMENT.md`: contributor and agent workflow
+- `docs/DESIGN.md`: canonical source for implemented technical boundaries, architecture, major design decisions, numeric application limits, and implementation history.
+- `SECURITY.md`: canonical source for security policy, threat model, reporting scope, sensitive-data handling, and deployment risks.
+- `docs/SETUP.md`: canonical source for deployment configuration, operational setup, and troubleshooting.
+- `README.md` and `README.ja.md`: user-facing overview, behavior, limitations, warnings, and setup routing. Keep those meanings aligned across both languages without requiring literal translation.
+- `docs/DEVELOPMENT.md`: contributor and agent workflow and the repository validation process.
 
-Keep tracked documentation deployment-agnostic.
+Do not introduce another tracked file to duplicate numeric limits, security boundaries, or operational configuration that already has a canonical home above. Keep tracked documentation deployment-agnostic.
 
 ## Local-only agent instructions
 

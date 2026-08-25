@@ -41,4 +41,12 @@ Never include the replacement credential in a report, log, commit, or screenshot
 - Authenticated `/mcp` POST bodies are limited to 256 KiB before MCP SDK dispatch, and unsupported top-level JSON-RPC batches are rejected before dispatch. A Cloudflare Rate Limiting binding applies 120 requests per 60 seconds per verified Access principal; it is an approximate location-local abuse control, not exact accounting. Missing or failed rate-limit enforcement fails closed.
 - Bearer-authenticated pCloud API requests use bounded POST parameters and never follow redirects. Temporary content requests also use HTTPS-only validated pCloud hosts, bounded final URLs, manual redirect handling, and explicit application timeouts. Search additionally has a fixed aggregate upstream-JSON budget, while every tool has an overall deadline and propagates client disconnects without exposing abort reasons or upstream targets.
 
+## Observability and sensitive-data handling
+
+The tracked Worker configuration enables invocation logs and disables Workers Traces. Sampling and other operational observability details are documented in `docs/SETUP.md` and `docs/DESIGN.md` rather than duplicated here.
+
+Application logs must not contain credentials, physical pCloud paths, temporary content URLs, filenames, file bytes, or extracted content. Treat temporary pCloud content URLs as credentials while they are valid, and keep pCloud access tokens and other secrets in Cloudflare's secret facilities rather than tracked configuration.
+
+A self-hoster who changes the tracked observability settings is responsible for reviewing the resulting retention, access, and disclosure risks before enabling broader logging, traces, or other telemetry.
+
 See the [self-hosting setup guide](docs/SETUP.md) for configuration details.
