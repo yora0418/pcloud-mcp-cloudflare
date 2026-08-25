@@ -62,7 +62,8 @@ If dependencies change, also run `npm.cmd install` before typechecking. Run any 
 
 Update public documentation when behavior, configuration, security boundaries, or architecture changes.
 
-- `README.md`: user-facing current behavior
+- `README.md`: English user-facing current behavior
+- `README.ja.md`: Japanese user-facing current behavior; keep behavior, warnings, and setup routing aligned with `README.md`
 - `docs/DESIGN.md`: architecture and security decisions
 - `docs/DEVELOPMENT.md`: contributor and agent workflow
 
