@@ -4,7 +4,7 @@
 
 A self-hosted, read-only remote MCP server that lets MCP-compatible AI clients such as ChatGPT access files stored in your pCloud account through Cloudflare Workers.
 
-This project is intended for people who want to connect their own pCloud account to an MCP client without running a dedicated server. Each user deploys their own Worker and supplies their own pCloud and Cloudflare configuration. YoraLAB does not receive or store users' pCloud access tokens.
+This project is intended for people who want to connect their own pCloud account to an MCP client without running a dedicated server. Each user deploys their own Worker and supplies their own pCloud and Cloudflare configuration.
 
 ## What you can do
 
@@ -28,6 +28,8 @@ This project is developed substantially with AI-assisted coding, including workf
 **Read-only does not mean private.** The Worker does not expose pCloud write tools, but an authorized MCP client can receive metadata and file contents from the pCloud scope you expose. Only expose content that you are willing to disclose to every identity and MCP client allowed by your Cloudflare Access policy.
 
 The pCloud access token itself is not limited to the read-only operations implemented by this Worker. Treat it as a high-value credential and never commit it, publish it, or paste it into an issue or public chat.
+
+The developer does not collect user data through this software. Your self-hosted deployment still uses pCloud, Cloudflare, and the MCP client you connect, each of which is a separate service.
 
 This is an early project. Interfaces, limits, setup requirements, and client compatibility may change.
 
