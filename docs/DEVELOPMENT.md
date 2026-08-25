@@ -1,6 +1,6 @@
 # Development Workflow
 
-This repository is intended to become public. Development should therefore keep tracked files and Git history public-ready even while the repository is private.
+This repository is maintained as public-ready. Tracked files and Git history should remain suitable for public distribution regardless of the repository's current visibility.
 
 ## Working model
 
@@ -78,7 +78,7 @@ Do not store raw credentials or access tokens in local instruction files when th
 
 ## Public-ready Git history
 
-Do not rely on deleting the repository history before publication.
+Do not rely on deleting or rewriting repository history before public distribution.
 
 Instead:
 
@@ -87,7 +87,7 @@ Instead:
 - do not commit temporary agent prompts or debugging transcripts
 - avoid history rewrites unless a real secret or sensitive value must be removed
 
-Before changing repository visibility, perform a separate history and secret review.
+Before changing repository visibility or publishing a release, perform a separate history and secret review.
 
 ## Commit messages and Git actions
 
