@@ -1,0 +1,7 @@
+schema_version: 1
+class: normal
+domain: productivity-operations
+user_type: agent
+type: service
+catalog_views:
+  - mcp
