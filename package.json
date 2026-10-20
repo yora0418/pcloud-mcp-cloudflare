@@ -25,7 +25,7 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.3.0",
     "agents": "0.20.1",
     "jose": "^6.2.4",
     "zod": "^4.3.6"
